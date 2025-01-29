@@ -456,6 +456,18 @@ getTransitiveUserInBlock(Operation *baseOp, scf::ForOp &forOp) {
   return users;
 }
 
+int getCopyVecBytes(RankedTensorType registerTy,
+                    ttg::SharedEncodingTrait sharedEnc) {
+  const int bitWidth = registerTy.getElementTypeBitWidth();
+  auto regLayout = triton::gpu::toLinearLayout(registerTy.getShape(),
+                                               registerTy.getEncoding());
+  auto sharedLayout =
+      triton::gpu::toLinearLayout(registerTy.getShape(), sharedEnc, bitWidth);
+  auto regToSharedLayout = regLayout.invertAndCompose(sharedLayout);
+  const int vecElems = regToSharedLayout.getNumConsecutiveInOut();
+  return vecElems * bitWidth / 8;
+}
+
 static llvm::MapVector<Operation *, LoadInfo>
 assignMemoryLayouts(scf::ForOp &forOp,
                     tt::ModuleAxisInfoAnalysis &axisInfoAnalysis) {
@@ -503,7 +515,6 @@ assignMemoryLayouts(scf::ForOp &forOp,
 
     bool isTMALoad = isa<tt::ExperimentalDescriptorLoadOp,
                          tt::ExperimentalDescriptorGatherOp>(op);
-    loadsToPipeline.insert(&op);
     LoadInfo loadInfo;
     for (auto use : users) {
       if (use->hasTrait<OpTrait::DotLike>()) {
@@ -542,6 +553,20 @@ assignMemoryLayouts(scf::ForOp &forOp,
               getBlockedEncoding(loadOp, axisInfoAnalysis);
       }
     }
+
+    if (loadInfo.sharedEncoding && !isTMALoad) {
+      auto registerTy = cast<RankedTensorType>(op.getResultTypes()[0]);
+      auto vecBytes = getCopyVecBytes(registerTy, loadInfo.sharedEncoding);
+
+      if (vecBytes < 4) {
+        // At least 4 bytes need to be consecutive for cp.async
+        loadInfo.sharedEncoding = nullptr;
+        continue;
+      }
+    } else {
+      loadsToPipeline.insert(&op);
+    }
+
     loadToInfo[&op] = loadInfo;
   }
   // Make sure all loads in loadsToPipeline are in loadToInfo.

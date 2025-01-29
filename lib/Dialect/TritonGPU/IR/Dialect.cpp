@@ -377,15 +377,27 @@ SmallVector<int64_t> getShapePerCTA(ArrayRef<unsigned> CTASplitNum,
   return shapePerCTA;
 }
 
-SmallVector<int64_t> getShapePerCTA(Attribute layout, ArrayRef<int64_t> shape) {
+SmallVector<int64_t> getShapePerCTA(Attribute layout,
+                                    ArrayRef<int64_t> shapeOrig) {
+  SmallVector<int64_t> shape(shapeOrig);
   if (auto sharedLayout = mlir::dyn_cast<SharedEncodingTrait>(layout)) {
+    if (isa<SharedEncodingMMAv5Fp4PaddedAttr>(sharedLayout)) {
+      auto packedAxis = sharedLayout.getOrder()[0];
+      if (shape.size() == 3) {
+        // Take into account multi buffering
+        shape[1 + packedAxis] *= 2;
+      } else {
+        shape[packedAxis] *= 2;
+      }
+    }
     // Special logic for pipeline pass, where shape is 3D and CTALayout is 2D.
     // The first dim of shape is numStages. This is a work around, otherwise
     // too many places would have to be modified in pipeline pass. Maybe we
     // need to refactor this logic in the future.
     auto CTASplitNum = sharedLayout.getCTASplitNum();
     if (shape.size() == CTASplitNum.size() + 1) {
-      auto res = getShapePerCTA(CTASplitNum, shape.drop_front());
+      auto res =
+          getShapePerCTA(CTASplitNum, ArrayRef<int64_t>(shape).drop_front());
       res.insert(res.begin(), shape.front());
       return res;
     }

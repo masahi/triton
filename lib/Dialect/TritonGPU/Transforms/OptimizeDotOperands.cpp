@@ -358,6 +358,11 @@ public:
       newInnerEnc = SharedEncodingAttr::get(
           getContext(), srcTy.getShape(), newInnerCvtOrder,
           allocEncoding.getCTALayout(), srcTy.getElementType());
+    } else if (auto allocEncoding =
+	       dyn_cast<SharedEncodingMMAv5Fp4PaddedAttr>(allocType.getEncoding())) {
+      newInnerEnc = SharedEncodingMMAv5Fp4PaddedAttr::get(
+          getContext(), srcTy.getShape(), newInnerCvtOrder,
+          allocEncoding.getCTALayout(), srcTy.getElementType());
     } else {
       llvm_unreachable("Unsupported shared encoding in FuseTransMMAV3Plus");
     }
