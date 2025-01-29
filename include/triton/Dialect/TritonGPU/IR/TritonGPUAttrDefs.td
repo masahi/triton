@@ -494,6 +494,57 @@ The concrete attribute class for an SMEM encoding, used by multiple GPU backends
   let hasCustomAssemblyFormat = 1;
 }
 
+def SharedEncodingMMAv5Fp4PaddedAttr : SharedEncoding<"SharedEncodingMMAv5Fp4Padded", "shared_encoding_mmav5_fp4_padded"> {
+  let mnemonic = "shared_mmav5_fp4_padded";
+
+  let description = [{
+  }];
+
+  // swizzle info: vec, perPhase, maxPhase
+  // order: the fastest-changing axis first
+  let parameters = (
+    ins
+    "unsigned":$vec__,
+    "unsigned":$perPhase__,
+    "unsigned":$maxPhase__,
+     ArrayRefParameter<"unsigned">:$order__,
+    "CTALayoutAttr":$CTALayout
+  );
+
+  let builders = [
+    AttrBuilder<(ins "ArrayRef<int64_t>":$shape,
+                     "ArrayRef<unsigned>":$order,
+                     "CTALayoutAttr":$CTALayout,
+                     "Type":$eltTy), [{
+        auto shapePerCTA = getShapePerCTA(CTALayout.getCTASplitNum(), shape);
+
+        int32_t eleBitWidth = eltTy.getIntOrFloatBitWidth();
+        int32_t vec = 128 / eleBitWidth, perPhase = 1, maxPhase = 1;
+
+        // get proper shared memory swizzling mode from the contiguous dimension
+        // size of the origin blocked layout.
+        auto contigDimSizeInByte = shapePerCTA[order[0]] * eleBitWidth / 8;
+        if (contigDimSizeInByte >= 128 && contigDimSizeInByte % 128 == 0) {
+          perPhase = 1;
+          maxPhase = 8;
+        } else if (contigDimSizeInByte >= 64 && contigDimSizeInByte % 64 == 0) {
+          perPhase = 2;
+          maxPhase = 4;
+        } else if (contigDimSizeInByte >= 32 && contigDimSizeInByte % 32 == 0) {
+          perPhase = 4;
+          maxPhase = 2;
+        } else {
+          llvm_unreachable("unsupported shared memory layout for MMAv3");
+        }
+
+        return $_get(context, vec, perPhase, maxPhase, order, CTALayout);
+    }]>
+  ];
+
+  let extraClassDeclaration = extraSharedEncodingDeclaration;
+  let hasCustomAssemblyFormat = 1;
+}
+
 //===----------------------------------------------------------------------===//
 // Distributed Layout Encoding
 //===----------------------------------------------------------------------===//

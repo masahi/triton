@@ -920,6 +920,48 @@ int32_t SharedEncodingAttr::getAlignment() const {
 }
 
 SmallVector<unsigned>
+SharedEncodingMMAv5Fp4PaddedAttr::getElemsPerThread(ArrayRef<int64_t> shape,
+                                                    Type eltTy) const {
+  llvm_unreachable("getElemsPerThread is not supported for shared layout");
+  return SmallVector<unsigned>();
+}
+unsigned SharedEncodingMMAv5Fp4PaddedAttr::getTotalElemsPerThread(
+    ArrayRef<int64_t> shape, Type eltTy) const {
+  llvm_unreachable("getElemsPerThread is not supported for shared layout");
+  return 0;
+}
+
+unsigned SharedEncodingMMAv5Fp4PaddedAttr::getVec() const { return getVec__(); }
+unsigned SharedEncodingMMAv5Fp4PaddedAttr::getPerPhase() const {
+  return getPerPhase__();
+}
+unsigned SharedEncodingMMAv5Fp4PaddedAttr::getMaxPhase() const {
+  return getMaxPhase__();
+}
+
+SmallVector<unsigned> SharedEncodingMMAv5Fp4PaddedAttr::getOrder() const {
+  return SmallVector<unsigned>(getOrder__());
+}
+
+SmallVector<unsigned> SharedEncodingMMAv5Fp4PaddedAttr::getCTAsPerCGA() const {
+  return SmallVector<unsigned>(getCTALayout().getCTAsPerCGA());
+}
+
+SmallVector<unsigned> SharedEncodingMMAv5Fp4PaddedAttr::getCTAOrder() const {
+  return SmallVector<unsigned>(getCTALayout().getCTAOrder());
+}
+
+SmallVector<unsigned> SharedEncodingMMAv5Fp4PaddedAttr::getCTASplitNum() const {
+  return SmallVector<unsigned>(getCTALayout().getCTASplitNum());
+}
+
+bool SharedEncodingMMAv5Fp4PaddedAttr::hasLeadingOffset() const { return true; }
+
+int32_t SharedEncodingMMAv5Fp4PaddedAttr::getAlignment() const {
+  return 128 * getMaxPhase();
+}
+
+SmallVector<unsigned>
 DotOperandEncodingAttr::getElemsPerThread(ArrayRef<int64_t> shape,
                                           Type eltTy) const {
   auto rank = shape.size();
@@ -1904,6 +1946,77 @@ void SharedEncodingAttr::print(AsmPrinter &printer) const {
   maybePrintCTALayout(getContext(), printer, getCTALayout(),
                       /*rank=*/getOrder().size());
   printer << ", hasLeadingOffset = " << hasLeadingOffset() << "}>";
+}
+
+Attribute SharedEncodingMMAv5Fp4PaddedAttr::parse(AsmParser &parser,
+                                                  Type type) {
+  if (parser.parseLess().failed())
+    return {};
+  // Parse the data as a dictionary
+  DictionaryAttr dict;
+  if (parser.parseAttribute(dict).failed())
+    return {};
+  if (parser.parseGreater().failed())
+    return {};
+
+  unsigned vec = 0;
+  unsigned perPhase = 0;
+  unsigned maxPhase = 0;
+  SmallVector<unsigned> order;
+  std::optional<SmallVector<unsigned>> CTAsPerCGA;
+  std::optional<SmallVector<unsigned>> CTASplitNum;
+  std::optional<SmallVector<unsigned>> CTAOrder;
+
+  for (const NamedAttribute &attr : dict) {
+    if (attr.getName() == "vec") {
+      if (parseUInt(parser, attr, vec, "vec").failed())
+        return {};
+    } else if (attr.getName() == "perPhase") {
+      if (parseUInt(parser, attr, perPhase, "perPhase").failed())
+        return {};
+    } else if (attr.getName() == "maxPhase") {
+      if (parseUInt(parser, attr, maxPhase, "maxPhase").failed())
+        return {};
+    } else if (attr.getName() == "order") {
+      if (parseIntArrayAttr(parser, attr, order, "order").failed())
+        return {};
+    } else if (attr.getName() == "CTAsPerCGA") {
+      if (parseIntArrayAttr(parser, attr, CTAsPerCGA.emplace(), "CTAsPerCGA")
+              .failed())
+        return {};
+    } else if (attr.getName() == "CTASplitNum") {
+      if (parseIntArrayAttr(parser, attr, CTASplitNum.emplace(), "CTASplitNum")
+              .failed())
+        return {};
+    } else if (attr.getName() == "CTAOrder") {
+      if (parseIntArrayAttr(parser, attr, CTAOrder.emplace(), "CTAOrder")
+              .failed())
+        return {};
+    } else {
+      parser.emitError(parser.getNameLoc(), "unexpected key: ")
+          << attr.getName().strref();
+      return {};
+    }
+  }
+
+  std::optional<CTALayoutAttr> CTALayout = getCTALayoutOrError(
+      parser, CTAsPerCGA, CTASplitNum, CTAOrder, /*rank=*/order.size());
+  if (!CTALayout.has_value())
+    return {};
+
+  return parser.getChecked<SharedEncodingMMAv5Fp4PaddedAttr>(
+      parser.getContext(), vec, perPhase, maxPhase, order, *CTALayout);
+}
+
+void SharedEncodingMMAv5Fp4PaddedAttr::print(AsmPrinter &printer) const {
+  printer << "<{"
+          << "vec = " << getVec() //
+          << ", perPhase = " << getPerPhase()
+          << ", maxPhase = " << getMaxPhase() //
+          << ", order = [" << ArrayRef<unsigned>(getOrder()) << "]";
+  maybePrintCTALayout(getContext(), printer, getCTALayout(),
+                      /*rank=*/getOrder().size());
+  printer << "}>";
 }
 
 //===----------------------------------------------------------------------===//
