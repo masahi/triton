@@ -523,7 +523,7 @@ def SharedEncodingMMAv5Fp4PaddedAttr : SharedEncoding<"SharedEncodingMMAv5Fp4Pad
 
         // get proper shared memory swizzling mode from the contiguous dimension
         // size of the origin blocked layout.
-        auto contigDimSizeInByte = shapePerCTA[order[0]] * eleBitWidth / 8;
+        auto contigDimSizeInByte = shapePerCTA[order[0]] * 2 * eleBitWidth / 8;
         if (contigDimSizeInByte >= 128 && contigDimSizeInByte % 128 == 0) {
           perPhase = 1;
           maxPhase = 8;

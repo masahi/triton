@@ -837,4 +837,6 @@ def test_mxfp8_mxfp4_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, B_TR
     out = mxfp8_mxfp4_matmul[grid](a, b, output, a_scale, b_scale, M, N, K, a_scale.stride(0), a.stride(0), a.stride(1),
                                    b.stride(0), b.stride(1), output.stride(0), output.stride(1), BLOCK_M, BLOCK_N,
                                    BLOCK_K, NUM_STAGES=NUM_STAGES)
+    ttgir = out.asm["ttgir"]
+    assert "#ttg.shared_mmav5_fp4_padded" in ttgir
     torch.testing.assert_close(ref_out, output, atol=1e-2, rtol=1e-2)

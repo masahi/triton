@@ -2548,6 +2548,9 @@ public:
     } else if (auto sharedAttr = mlir::dyn_cast<SharedEncodingAttr>(attr)) {
       os << "shared";
       return AliasResult::FinalAlias;
+    } else if (auto sharedAttr = mlir::dyn_cast<SharedEncodingMMAv5Fp4PaddedAttr>(attr)) {
+      os << "shared_mmav5_fp4_padded";
+      return AliasResult::FinalAlias;
     } else if (auto sharedAttr = mlir::dyn_cast<SharedEncodingTrait>(attr)) {
       llvm_unreachable(
           "Unsupported shared encoding in TritonGPUOpAsmInterface::getAlias");
