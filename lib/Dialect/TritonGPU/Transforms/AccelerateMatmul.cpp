@@ -10,6 +10,7 @@
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/TritonGPUInterfaces.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Tools/LayoutUtils.h"
@@ -172,12 +173,21 @@ static Value getSharedMemoryMMAOperand(
            "expected.";
   }
 
+  auto CTALayout = getCTALayout(argType.getEncoding());
+  SharedEncodingTrait newLayout;
+
+  if (isMMAv5Fp4Padded) {
+    newLayout = SharedEncodingMMAv5Fp4PaddedAttr::get(
+        argType.getContext(), argType.getShape(), newOrder, CTALayout,
+        argType.getElementType());
+  } else {
+    newLayout =
+        SharedEncodingAttr::get(argType.getContext(), argType.getShape(),
+                                newOrder, CTALayout, argType.getElementType());
+  }
+
   Attribute SharedMemorySpace =
       SharedMemorySpaceAttr::get(argType.getContext());
-  auto CTALayout = getCTALayout(argType.getEncoding());
-  auto newLayout =
-      SharedEncodingAttr::get(argType.getContext(), argType.getShape(),
-                              newOrder, CTALayout, argType.getElementType());
   auto newType = MemDescType::get(argType.getShape(), argType.getElementType(),
                                   newLayout, SharedMemorySpace);
   rewriter.setInsertionPointAfterValue(arg);
