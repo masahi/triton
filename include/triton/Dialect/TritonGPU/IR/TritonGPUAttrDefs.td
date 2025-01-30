@@ -498,6 +498,7 @@ def SharedEncodingMMAv5Fp4PaddedAttr : SharedEncoding<"SharedEncodingMMAv5Fp4Pad
   let mnemonic = "shared_mmav5_fp4_padded";
 
   let description = [{
+     "TODO"
   }];
 
   // swizzle info: vec, perPhase, maxPhase
@@ -521,8 +522,9 @@ def SharedEncodingMMAv5Fp4PaddedAttr : SharedEncoding<"SharedEncodingMMAv5Fp4Pad
         int32_t eleBitWidth = eltTy.getIntOrFloatBitWidth();
         int32_t vec = 128 / eleBitWidth, perPhase = 1, maxPhase = 1;
 
-        // get proper shared memory swizzling mode from the contiguous dimension
+        // Get proper shared memory swizzling mode from the contiguous dimension
         // size of the origin blocked layout.
+        // Multiply the size by 2 to take into account packing in registers / padding in SMEM.
         auto contigDimSizeInByte = shapePerCTA[order[0]] * 2 * eleBitWidth / 8;
         if (contigDimSizeInByte >= 128 && contigDimSizeInByte % 128 == 0) {
           perPhase = 1;
@@ -534,7 +536,7 @@ def SharedEncodingMMAv5Fp4PaddedAttr : SharedEncoding<"SharedEncodingMMAv5Fp4Pad
           perPhase = 4;
           maxPhase = 2;
         } else {
-          llvm_unreachable("unsupported shared memory layout for MMAv3");
+          llvm_unreachable("The size in the contiguous dimension must be a multiple of 32, 64, or 128 bytes for SMEM encoding with leading offset.");
         }
 
         return $_get(context, vec, perPhase, maxPhase, order, CTALayout);
