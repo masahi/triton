@@ -353,6 +353,21 @@ getBlockedEncoding(tt::LoadOp loadOp, tt::ModuleAxisInfoAnalysis &axisInfo) {
                                        threadsPerWarp, ctaLayout);
 }
 
+int getContiguousDimSizeInBytes(Operation *loadOp) {
+  auto ty = cast<RankedTensorType>(loadOp->getResultTypes()[0]);
+  auto ctaLayout = ttg::getCTALayout(ty.getEncoding());
+  auto shape = ty.getShape();
+  auto eltTy = ty.getElementType();
+  auto shapePerCTA = ttg::getShapePerCTA(ctaLayout.getCTASplitNum(), shape);
+  auto order = ttg::getOrder(ty.getEncoding());
+  return shapePerCTA[order[0]] * eltTy.getIntOrFloatBitWidth() / 8;
+}
+
+bool canSwizzleDstSmem(Operation *loadOp) {
+  auto contigBytes = getContiguousDimSizeInBytes(loadOp);
+  return contigBytes >= 32 && contigBytes % 32 == 0;
+}
+
 static std::optional<ttg::SharedEncodingTrait>
 getSharedEncoding(Operation *loadOp, bool isTMALoad) {
   auto ty = cast<RankedTensorType>(loadOp->getResultTypes()[0]);
@@ -390,7 +405,7 @@ getSharedEncoding(Operation *loadOp, bool isTMALoad) {
     }
   }
 
-  if (isTMALoad) {
+  if (isTMALoad && canSwizzleDstSmem(loadOp)) {
     // For TMA, the encoding compatible with it takes precedence over local
     // alloc created for the MMA operand.
     if (localAllocEnc) {
@@ -534,7 +549,7 @@ assignMemoryLayouts(scf::ForOp &forOp,
         loadInfo.usedByDot = true;
         loadInfo.isMMAv3Shared = mmav3Shmem;
 
-        if (mmav3Shmem || isTMALoad) {
+        if (mmav3Shmem || (isTMALoad && canSwizzleDstSmem(&op))) {
           loadInfo.sharedEncoding =
               getSharedEncoding(&op, isTMALoad).value_or(nullptr);
         } else if (!mmav3Shmem || dot) {
@@ -663,11 +678,16 @@ static void createTMABarrierAndWait(
       for (Operation *user : loadInfo->loadOp->getUsers()) {
         auto it = loadToInfo.find(loadInfo->loadOp);
         if (it != loadToInfo.end()) {
-          // Special case for MMAv3 loads, we can ignore the alloc and only
-          // consider uses of the alloc op since it will be removed.
-          if (it->second.isMMAv3Shared) {
-            auto alloc = cast<ttg::LocalAllocOp>(
-                (*loadInfo->loadOp->getUsers().begin()));
+          // Special case for MMAv3 operand or MMAv5 scale loads, we can ignore
+          // the alloc and only consider uses of the alloc op since it will be
+          // removed.
+          if (it->second.isMMAv3Shared || it->second.isMMAv5Scale) {
+            auto user = *loadInfo->loadOp->getUsers().begin();
+            assert(
+                isa<triton::gpu::LocalAllocOp>(user) &&
+                "Loading of MMAv3 operands and MMAv5 scale is expected to be "
+                "consumed by LocalAlloc.");
+            auto alloc = cast<ttg::LocalAllocOp>(user);
             if (alloc->getBlock() == loadBlock) {
               users.insert(alloc->getUsers().begin(), alloc->getUsers().end());
               continue;

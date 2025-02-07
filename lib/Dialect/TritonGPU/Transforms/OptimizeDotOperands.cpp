@@ -244,6 +244,8 @@ private:
       return false;
     }
 
+    return true;
+
     if (scaleType.getRank() != 2) {
       // TODO: Add support for higher rank when 5D coalesced load is fixed
       // or 4D TMA is supported.

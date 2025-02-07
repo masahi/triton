@@ -33,7 +33,7 @@ lowerTMALoad(Operation *op, RankedTensorType tensorType, Value desc,
   auto ctaLayout = getCTALayout(tensorType.getEncoding());
   Attribute encoding = SwizzledSharedEncodingAttr::get(
       tensorType.getContext(), 1, 1, 1, order, ctaLayout);
-  if (tensorType.getRank() > 1) {
+  if (tensorType.getRank() == 2) {
     encoding = NVMMASharedEncodingAttr::get(
         tensorType.getContext(), tensorType.getShape(), order, ctaLayout,
         tensorType.getElementType(), /*fp4Padded*/ false);

@@ -3,7 +3,7 @@ import pytest
 import torch
 import triton
 import triton.language as tl
-import triton.tools.experimental_descriptor
+from triton.tools.experimental_descriptor import TmaDescKernelParam
 from test_mxfp import MXFP4Tensor, MXScaleTensor
 import re
 from triton._internal_testing import is_cuda, is_hip, is_hip_mi200
@@ -844,3 +844,115 @@ def test_mxfp8_mxfp4_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, B_TR
     ttgir = out.asm["ttgir"]
     assert "fp4Padded = true" in ttgir
     torch.testing.assert_close(ref_out, output, atol=1e-3, rtol=1e-3)
+
+
+@triton.jit
+def block_scale_mxfp_matmul_tma(  #
+        a_desc, b_desc, output_ptr,  #
+        a_scale_desc, b_scale_desc,  #
+        M, K, stride_cm, stride_cn,  #
+        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,  #
+        rep_m: tl.constexpr, rep_n: tl.constexpr, rep_k: tl.constexpr,  #
+        NUM_STAGES: tl.constexpr):
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_M)
+    pid_m = (pid % num_pid_m)
+    pid_n = pid // num_pid_m
+    offs_am = pid_m * BLOCK_M
+    offs_bn = pid_n * BLOCK_N
+    offs_k = 0
+    offset_m_scale = pid_m * rep_m
+    offset_n_scale = pid_n * rep_n
+    offset_k_scale = 0
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=output_ptr.dtype.element_ty)
+
+    for _ in tl.range(0, tl.cdiv(K, BLOCK_K), num_stages=NUM_STAGES):
+        a = tl._experimental_descriptor_load(a_desc, [offs_am, offs_k], [BLOCK_M, BLOCK_K], tl.float8e5)
+        b = tl._experimental_descriptor_load(b_desc, [offs_k, offs_bn], [BLOCK_K, BLOCK_N], tl.float8e5)
+        scale_a = tl._experimental_descriptor_load(a_scale_desc, [offset_m_scale, offset_k_scale, 0, 0],
+                                                   [rep_m, rep_k, 32, 16], tl.dtype("uint8"))
+        scale_b = tl._experimental_descriptor_load(b_scale_desc, [offset_n_scale, offset_k_scale, 0, 0],
+                                                   [rep_n, rep_k, 32, 16], tl.dtype("uint8"))
+        scale_a = scale_a.reshape(rep_m, rep_k, 32, 4, 4).trans(0, 3, 2, 1, 4).reshape(BLOCK_M, BLOCK_K // 32)
+        scale_b = scale_b.reshape(rep_n, rep_k, 32, 4, 4).trans(0, 3, 2, 1, 4).reshape(BLOCK_N, BLOCK_K // 32)
+        accumulator = tl.dot_scaled(a, scale_a, "e5m2", b, scale_b, "e5m2", accumulator)
+        offs_k += BLOCK_K
+        offset_k_scale += rep_k
+
+    offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    output_ptrs = output_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    tl.store(output_ptrs, accumulator)
+
+
+@pytest.mark.parametrize("M, N, K", [(1024, 512, 512)])
+@pytest.mark.parametrize("BLOCK_M, BLOCK_N, BLOCK_K", [(128, 128, 128), (256, 128, 128), (128, 256, 128),
+                                                       (128, 128, 256), (128, 256, 256)])
+@pytest.mark.parametrize("NUM_STAGES", [1, 2, 4])
+@pytest.mark.skipif(torch.cuda.get_device_capability()[0] < 10, reason="Requires compute capability >= 10")
+def test_blocked_scale_mxfp_tma(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, device):
+    if BLOCK_N == 256 and BLOCK_K == 256:
+        NUM_STAGES = min(NUM_STAGES, 2)
+    elif BLOCK_K == 256:
+        NUM_STAGES = min(NUM_STAGES, 3)
+
+    def unpack_scale(packed):
+        num_chunk_m, num_chunk_k, _, _ = packed.shape
+        return packed.reshape(num_chunk_m, num_chunk_k, 32, 4,
+                              4).permute(0, 3, 2, 1, 4).reshape(num_chunk_m * 128, num_chunk_k * 4).contiguous()
+
+    torch.manual_seed(42)
+    dtype_src_str = "float8e5"
+    dtype_dst_str = "float32"
+
+    a = torch.randint(20, 40, (M, K), dtype=torch.uint8, device=device).view(torch.float8_e5m2)
+    A = f8_to_f16(a, dtype_src_str)
+    b = torch.randint(20, 40, (K, N), dtype=torch.uint8, device=device).view(torch.float8_e5m2)
+    B = f8_to_f16(b, dtype_src_str)
+    ceildiv = lambda a, b: math.ceil(a / b)
+    a_scale = torch.randint(130, (ceildiv(M, 128), ceildiv(K, 128), 32, 16), dtype=torch.uint8).to(device)
+    b_scale = torch.randint(130, (ceildiv(N, 128), ceildiv(K, 128), 32, 16), dtype=torch.uint8).to(device)
+
+    rep_m = BLOCK_M // 128
+    rep_n = BLOCK_N // 128
+    rep_k = BLOCK_K // 128
+
+    a_desc = TmaDescKernelParam(a.data_ptr(), a.shape, [BLOCK_M, BLOCK_K], 1)
+    b_desc = TmaDescKernelParam(b.data_ptr(), b.shape, [BLOCK_K, BLOCK_N], 1)
+    a_scale_desc = TmaDescKernelParam(a_scale.data_ptr(), a_scale.shape, [rep_m, rep_k, 32, 16], 1)
+    b_scale_desc = TmaDescKernelParam(b_scale.data_ptr(), b_scale.shape, [rep_n, rep_k, 32, 16], 1)
+
+    dtype_dst = getattr(torch, dtype_dst_str)
+    output = torch.empty((M, N), dtype=dtype_dst, device=device)
+    grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
+    out = block_scale_mxfp_matmul_tma[grid](a_desc, b_desc, output, a_scale_desc, b_scale_desc, M, K, output.stride(0),
+                                            output.stride(1), BLOCK_M, BLOCK_N, BLOCK_K, rep_m, rep_n, rep_k,
+                                            NUM_STAGES=NUM_STAGES)
+    ttgir = out.asm["ttgir"]
+
+    print(ttgir)
+
+    a_scale_f32 = unpack_scale(fp8e8m0_to_float32(a_scale))[:M]
+    b_scale_f32 = unpack_scale(fp8e8m0_to_float32(b_scale))[:N]
+    a_scale_f32 = a_scale_f32.repeat_interleave(32, dim=1)
+    b_scale_f32 = b_scale_f32.repeat_interleave(32, dim=1)
+
+    # b_scales are always col major
+    b_scale_f32 = b_scale_f32.T.contiguous()
+
+    a = A * a_scale_f32
+    b = B * b_scale_f32
+    ref_out = torch.matmul(a, b).to(torch.float32)
+    output = output.to(torch.float32)
+
+    atol = 0.0001
+    rtol = 0.0001
+
+    torch.testing.assert_close(ref_out, output, atol=atol, rtol=rtol)
+
+    if NUM_STAGES > 1:
+        # Verify that MMA pipelining has been applied
+        assert "ttng.wait_barrier" in ttgir
+
+
+# test_blocked_scale_mxfp_tma(1024, 1024, 512, 128, 128, 256, 3, "cuda")
