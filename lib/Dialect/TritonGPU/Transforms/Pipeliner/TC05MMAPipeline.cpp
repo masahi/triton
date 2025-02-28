@@ -572,15 +572,21 @@ void createBarrierAndWaitOps(IRRewriter &builder, scf::ForOp forOp,
 
 bool isSafeToPipeline(ttng::TCGen5MMAScaledOp scaledDot) {
   auto isCopiedByTMEMCopy = [=](Value scale) {
-    if (!scale.hasOneUse()) {
-      // Should be used only by the scaled dot op
+    auto scaleTy = cast<ttg::MemDescType>(scale.getType());
+    if (!isa<ttg::SharedMemorySpaceAttr>(scaleTy.getMemorySpace())) {
+      // MMAv5 scaled dot (tcgen05.mma mxf8f6f4) is safe to be pipelined only
+      // when its scales in TMEM are stored by the TMEMCopy op (tcgen05.cp).
+      // That condition is equivalent to scale arguments of
+      // ttng::TCGen5MMAScaledOp being in SMEM during SWP in our convention.
       return false;
     }
 
+    // Should be used only by the scaled dot op
+    if (!scale.hasOneUse()) {
+      return false;
+    }
     for (auto user : scale.getUsers()) {
       if (!isa<ttng::TCGen5MMAScaledOp>(user)) {
-        // If the scale is used by TMEM copy and the only other user is the
-        // scaled dot op, MMA pipelining is safe to apply.
         return false;
       }
     }
