@@ -577,7 +577,8 @@ bool isSafeToPipeline(ttng::TCGen5MMAScaledOp scaledDot) {
       // MMAv5 scaled dot (tcgen05.mma mxf8f6f4) is safe to be pipelined only
       // when its scales in TMEM are stored by the TMEMCopy op (tcgen05.cp).
       // That condition is equivalent to scale arguments of
-      // ttng::TCGen5MMAScaledOp being in SMEM during SWP in our convention.
+      // ttng::TCGen5MMAScaledOp being in SMEM and multi-buffered during SWP in
+      // our convention.
       return false;
     }
 
