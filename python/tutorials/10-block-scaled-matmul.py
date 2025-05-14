@@ -98,28 +98,32 @@ def _matmul_launch_metadata(grid, kernel, args):
             elif args["VEC_SIZE"] == 32:
                 kernel_name += "_mxfp4"
     ret["name"] = f"{kernel_name} [M={M}, N={N}, K={K}]"
-    ret["flops"] = 2. * M * N * K
+    ret["flops"] = 2.0 * M * N * K
     return ret
 
 
 @triton.jit(launch_metadata=_matmul_launch_metadata)
 def block_scaled_matmul_kernel(  #
-        a_desc, a_scale_desc,  #
-        b_desc, b_scale_desc,  #
-        c_desc,  #
-        M: tl.constexpr, N: tl.constexpr, K: tl.constexpr,  #
-        output_type: tl.constexpr,  #
-        ELEM_PER_BYTE_A: tl.constexpr,  #
-        ELEM_PER_BYTE_B: tl.constexpr,  #
-        VEC_SIZE: tl.constexpr,  #
-        BLOCK_M: tl.constexpr,  #
-        BLOCK_N: tl.constexpr,  #
-        BLOCK_K: tl.constexpr,  #
-        rep_m: tl.constexpr,
-        rep_n: tl.constexpr,
-        rep_k: tl.constexpr,
-        NUM_STAGES: tl.constexpr):  #
-
+    a_desc,
+    a_scale_desc,  #
+    b_desc,
+    b_scale_desc,  #
+    c_desc,  #
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,  #
+    output_type: tl.constexpr,  #
+    ELEM_PER_BYTE_A: tl.constexpr,  #
+    ELEM_PER_BYTE_B: tl.constexpr,  #
+    VEC_SIZE: tl.constexpr,  #
+    BLOCK_M: tl.constexpr,  #
+    BLOCK_N: tl.constexpr,  #
+    BLOCK_K: tl.constexpr,  #
+    rep_m: tl.constexpr,
+    rep_n: tl.constexpr,
+    rep_k: tl.constexpr,
+    NUM_STAGES: tl.constexpr,
+):  #
     if output_type == 0:
         output_dtype = tl.float32
     elif output_type == 1:
@@ -181,10 +185,27 @@ def block_scaled_matmul(a_desc, a_scale_desc, b_desc, b_scale_desc, dtype_dst, M
     c_desc = TensorDescriptor.from_tensor(output, [BLOCK_M, BLOCK_N])
 
     grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
-    out = block_scaled_matmul_kernel[grid](a_desc, a_scale_desc, b_desc, b_scale_desc, c_desc, M, N, K, dtype_dst,
-                                     configs["ELEM_PER_BYTE_A"], configs["ELEM_PER_BYTE_B"], configs["VEC_SIZE"],
-                                     configs["BLOCK_SIZE_M"], configs["BLOCK_SIZE_N"], configs["BLOCK_SIZE_K"], rep_m, rep_n, rep_k,
-                                     configs["num_stages"])
+    out = block_scaled_matmul_kernel[grid](
+        a_desc,
+        a_scale_desc,
+        b_desc,
+        b_scale_desc,
+        c_desc,
+        M,
+        N,
+        K,
+        dtype_dst,
+        configs["ELEM_PER_BYTE_A"],
+        configs["ELEM_PER_BYTE_B"],
+        configs["VEC_SIZE"],
+        configs["BLOCK_SIZE_M"],
+        configs["BLOCK_SIZE_N"],
+        configs["BLOCK_SIZE_K"],
+        rep_m,
+        rep_n,
+        rep_k,
+        configs["num_stages"],
+    )
     return output
 
 
@@ -277,8 +298,9 @@ def initialize_block_scaled(M, N, K, block_scale_type="nvfp4", compute_reference
 
 
 def validate_block_scaled(M, N, K, block_scale_type="nvfp4"):
-    a_desc, a_scale, b_desc, b_scale, rep_m, rep_n, rep_k, configs, reference = initialize_block_scaled(M, N, K, block_scale_type,
-                                                                                   compute_reference=True)
+    a_desc, a_scale, b_desc, b_scale, rep_m, rep_n, rep_k, configs, reference = initialize_block_scaled(
+        M, N, K, block_scale_type, compute_reference=True
+    )
     output = block_scaled_matmul(a_desc, a_scale, b_desc, b_scale, torch.float16, M, N, K, rep_m, rep_n, rep_k, configs)
     torch.testing.assert_close(reference, output.to(torch.float32), atol=1e-3, rtol=1e-3)
     print(f"✅ (pass {block_scale_type})")
@@ -290,8 +312,9 @@ def bench_block_scaled(K, block_scale_type="nvfp4", reps=10):
     N = 8192
     print(f"Problem Shape = {M}x{N}x{K}")
 
-    a_desc, a_scale, b_desc, b_scale, rep_m, rep_n, rep_k, configs, _ = initialize_block_scaled(M, N, K, block_scale_type,
-                                                                           compute_reference=False)
+    a_desc, a_scale, b_desc, b_scale, rep_m, rep_n, rep_k, configs, _ = initialize_block_scaled(
+        M, N, K, block_scale_type, compute_reference=False
+    )
     _ = block_scaled_matmul(a_desc, a_scale, b_desc, b_scale, torch.float16, M, N, K, rep_m, rep_n, rep_k, configs)
 
     proton.activate(0)
@@ -303,6 +326,7 @@ def bench_block_scaled(K, block_scale_type="nvfp4", reps=10):
 
 def show_profile(profile_name):
     import triton.profiler.viewer as proton_viewer
+
     metric_names = ["time/ms"]
     metric_names = ["tflop/s"] + metric_names
     file_name = f"{profile_name}.hatchet"
