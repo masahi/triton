@@ -12,6 +12,7 @@
 #include "Dialect/NVWS/IR/NVWSAttrEnums.cpp.inc"
 
 #define GET_OP_CLASSES
+#include "Dialect/NVWS/IR/NVWSOpInterfaces.cpp.inc"
 #include "Dialect/NVWS/IR/Ops.cpp.inc"
 
 namespace mlir::triton::nvws {

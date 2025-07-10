@@ -5,6 +5,7 @@
 #include "mlir/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "nvidia/include/Dialect/NVWS/Transforms/Passes.h"
 
 using namespace mlir;
 using namespace triton;
@@ -34,6 +35,7 @@ struct AutomaticWarpSpecialization
 void AutomaticWarpSpecialization::runOnOperation() {
   OpPassManager pm;
   pm.addPass(createTritonGPUPartitionScheduling());
+  pm.addPass(createNVWSInsertAref());
   pm.addPass(createTritonGPULoadMMASpecialization({numStages}));
   pm.addPass(createTritonGPURewritePartitionDependencies());
   // `int-range-optimizations` and SCCP are good at cleaning up loop arithmetic.

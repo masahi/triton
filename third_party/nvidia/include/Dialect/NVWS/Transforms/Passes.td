@@ -64,4 +64,20 @@ def NVWSLowerAref : Pass<"nvws-lower-aref", "mlir::ModuleOp"> {
   ];
 }
 
+def NVWSInsertAref: Pass<"nvws-inser-aref", "mlir::ModuleOp"> {
+  let summary = "insert arefs into the code";
+
+  let description = [{
+  }];
+
+//  let constructor = "mlir::createNVWSInsertArefPass()";
+
+  let dependentDialects = [
+    "mlir::triton::nvws::NVWSDialect",
+    "mlir::triton::TritonDialect",
+    "mlir::triton::gpu::TritonGPUDialect",
+    "mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect"
+  ];
+}
+
 #endif // NVWS_PASSES
