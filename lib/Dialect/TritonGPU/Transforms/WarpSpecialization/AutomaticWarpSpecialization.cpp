@@ -43,9 +43,9 @@ void AutomaticWarpSpecialization::runOnOperation() {
   // pm.addPass(arith::createIntRangeOptimizationsPass());
   pm.addPass(createSCCPPass());
   pm.addPass(createCSEPass());
-  pm.addPass(createTritonGPUPartitionLoops());
+  pm.addPass(createTritonGPUPartitionLoops()); // code split + nvws.warp_group emit
   // aref optimize
-  pm.addPass(mlir::triton::createNVWSLowerAref()); // depth
+  pm.addPass(mlir::triton::createNVWSLowerAref()); // TODO: depth
   pm.addPass(mlir::triton::createNVWSLowerWarpGroup());
 
   if (failed(runPipeline(pm, getOperation())))

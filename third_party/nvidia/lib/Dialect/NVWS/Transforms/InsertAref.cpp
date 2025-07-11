@@ -547,6 +547,239 @@ void runArefInsertionOnLoop(scf::ForOp loop, WarpSchedule &schedule) {
   }
 }
 
+template <typename EnterOp, typename ExitOp>
+void createCombinedArefOps(SmallVector<EnterOp> &enterOps,
+                           SmallVector<ExitOp> &exitOps,
+                           ArefCreateOp aref, OpBuilder &builder, WarpSchedule& schedule) {
+  auto firstEnter = *llvm::min_element(enterOps, [](auto a, auto b) {
+    assert(a->getBlock() == b->getBlock());
+    return a->isBeforeInBlock(b);
+  });
+
+  auto lastExit = *llvm::max_element(exitOps, [](auto a, auto b) {
+    assert(a->getBlock() == b->getBlock());
+    return a->isBeforeInBlock(b);
+  });
+
+  SmallVector<Type> arefEnterBuffers;
+  for (auto enterOp : enterOps) {
+    arefEnterBuffers.push_back(enterOp.getResult(0).getType());
+  }
+
+  llvm::SmallSetVector<Attribute, 5> opAttrsSet;
+  for (Operation *exitOp : exitOps) {
+    // TODO: an interface for exit op
+    if (auto putExit = dyn_cast<ArefPutExitOp>(exitOp)) {
+      opAttrsSet.insert(putExit.getAsyncOps()[0]);
+    } else if (auto getExit = dyn_cast<ArefGetExitOp>(exitOp)) {
+      opAttrsSet.insert(getExit.getAsyncOps()[0]);
+    }
+  }
+  llvm::SmallVector<Attribute> producersOrConsumers(opAttrsSet.begin(),
+                                                    opAttrsSet.end());
+
+  // TODO: Use dominance to properly place the combined get enter after the combined put exit
+  builder.setInsertionPoint(firstEnter);
+  auto zero =
+    mkConstant(builder, firstEnter->getLoc(), 0, 32, schedule.getPartition(firstEnter), schedule);
+  auto enter = builder.create<EnterOp>(firstEnter->getLoc(), arefEnterBuffers,
+                                       aref, zero);
+  builder.setInsertionPoint(lastExit);
+  auto exit =
+      builder.create<ExitOp>(lastExit->getLoc(), aref, zero,
+                             builder.getArrayAttr(producersOrConsumers));
+
+  for (auto [idx, enterOp] : llvm::enumerate(enterOps))
+    enterOp.getResult(0).replaceAllUsesWith(enter.getResult(idx));
+
+  for (auto op : SmallVector<Operation *>{enter, exit}) {
+    op->setAttr("aref_tag", firstEnter->getAttr("aref_tag"));
+    schedule.insert(schedule.getPartition(firstEnter), op);
+  }
+}
+
+void combineArefs(scf::ForOp loop, WarpSchedule &schedule) {
+  // this subpass will combine arefs into a single one if aref are
+  // used by the same op in the same block:
+
+  // %buf_a = alloc(); %aref_a = aref_create %buf_a
+  // %buf_b = alloc(); %aref_b = aref_create %buf_b
+
+  // %a = aref_get.enter %aref_a
+  // %b = aref_get.enter %aref_b
+  //   .. = op .. %a, .. , %b ..
+  // aref_get.exit %aref_a
+  // aref_get.exit %aref_B
+
+  // %a = aref_put.neter %aref_a
+  //  store .. %a
+  // aref_put.exit %aref_a
+  // %b = aref_put.neter %aref_b
+  //  store .. %b
+  // aref_put.exit %aref_b
+
+  // becomes
+
+  // %buf_a = alloc(); %buf_b = alloc(); %aref_ab = aref_create %buf_a,
+  // %buf_b
+
+  // %a = aref_get.enter %aref_ab
+  // %b = aref_get.enter %aref_ab
+  //   .. = op .. %a, .. , %b ..
+  // aref_get.exit %aref_ab
+
+  // %a,5b = aref_put.enter %aref_ab
+  //  store .. %a
+  //  store .. %b
+  // aref_put.exit %aref_ab
+
+  // for now this happens at MMA sites, so we just visit MMA ops, generic
+  // algorithm can be implemented at a later time
+
+  std::function<ArefCreateOp(Value)> findAref =
+      [&](Value opnd) -> ArefCreateOp {
+    if (!opnd)
+      return {};
+    if (auto op = opnd.getDefiningOp()) {
+      if (auto enterOp = dyn_cast<ArefGetEnterOp>(op)) {
+        return cast<ArefCreateOp>(enterOp.getAref().getDefiningOp());
+      } else {
+        for (auto operand : op->getOperands())
+          if (auto aref = findAref(operand))
+            return aref;
+      }
+    }
+    return {};
+  };
+
+  SmallVector<SmallVector<ArefCreateOp>> arefsToFuse;
+  loop.walk([&](Operation *op) {
+    Value Aopnd, Bopnd, AScaleOpnd, BScaleOpnd;
+    if (auto wgmma = dyn_cast<WarpGroupDotOp>(op)) {
+      Aopnd = wgmma.getA();
+      Bopnd = wgmma.getB();
+    } else if (auto mmav5 = dyn_cast<TCGen5MMAOp>(op)) {
+      Aopnd = mmav5.getA();
+      Bopnd = mmav5.getB();
+    } else if (auto mmav5scaled = dyn_cast<TCGen5MMAScaledOp>(op)) {
+      Aopnd = mmav5scaled.getA();
+      Bopnd = mmav5scaled.getB();
+      AScaleOpnd = mmav5scaled.getAScale();
+      BScaleOpnd = mmav5scaled.getBScale();
+    } else {
+      return WalkResult::advance();
+    }
+
+    auto usedInTheSameBlock = [](ArefCreateOp arefA, ArefCreateOp arefB) {
+      Block *putABlock, *getABlock;
+      Block *putBBlock, *getBBlock;
+      for (auto user : arefA->getUsers()) {
+        if (isa<ArefPutEnterOp>(user)) {
+          putABlock = user->getBlock();
+        } else if (isa<ArefGetEnterOp>(user)) {
+          getABlock = user->getBlock();
+        }
+      }
+
+      for (auto user : arefB->getUsers()) {
+        if (isa<ArefPutEnterOp>(user)) {
+          putBBlock = user->getBlock();
+        } else if (isa<ArefGetEnterOp>(user)) {
+          getBBlock = user->getBlock();
+        }
+      }
+
+      return putABlock == putBBlock && getABlock == getBBlock;
+    };
+
+    auto usedOnce = [](ArefCreateOp aref) {
+      return llvm::count_if(aref->getUsers(), [](auto) { return true; }) == 4;
+    };
+
+    // verify that all put/gets are in the same BB
+    auto arefA = findAref(Aopnd);
+    auto arefB = findAref(Bopnd);
+    SmallVector<ArefCreateOp> arefs;
+    if (arefA && arefB && usedOnce(arefA) && usedOnce(arefB) &&
+        usedInTheSameBlock(arefA, arefB)) {
+      arefs.push_back(arefA);
+      arefs.push_back(arefB);
+    } else {
+      return WalkResult::advance();
+    }
+
+    auto arefAScale = findAref(AScaleOpnd);
+    if (arefAScale &&
+        isa<SharedMemorySpaceAttr>(
+            cast<MemDescType>(AScaleOpnd.getType()).getMemorySpace()) &&
+        usedOnce(arefAScale) && usedInTheSameBlock(arefAScale, arefA))
+      arefs.push_back(arefAScale);
+
+    auto arefBScale = findAref(BScaleOpnd);
+    if (arefBScale &&
+        isa<SharedMemorySpaceAttr>(
+            cast<MemDescType>(BScaleOpnd.getType()).getMemorySpace()) &&
+        usedOnce(arefBScale) && usedInTheSameBlock(arefBScale, arefA))
+      arefs.push_back(arefBScale);
+
+    if (!arefs.empty())
+      arefsToFuse.push_back(arefs);
+    return WalkResult::advance();
+  });
+
+  //   now fuse arefs
+  for (auto arefs : arefsToFuse) {
+    SmallVector<ArefPutEnterOp> putEnterOps;
+    SmallVector<ArefPutExitOp> putExitOps;
+    SmallVector<ArefGetEnterOp> getEnterOps;
+    SmallVector<ArefGetExitOp> getExitOps;
+    for (auto aref : arefs) {
+      for (auto user : aref->getUsers()) {
+        if (auto putEnterOp = dyn_cast<ArefPutEnterOp>(user)) {
+          putEnterOps.push_back(putEnterOp);
+        } else if (auto putExitOp = dyn_cast<ArefPutExitOp>(user)) {
+          putExitOps.push_back(putExitOp);
+        } else if (auto getEnterOp = dyn_cast<ArefGetEnterOp>(user)) {
+          getEnterOps.push_back(getEnterOp);
+        } else if (auto getExitOp = dyn_cast<ArefGetExitOp>(user)) {
+          getExitOps.push_back(getExitOp);
+        }
+      }
+    }
+
+    // set insertion point at the last aref_create
+    SmallVector<Type> arefBufTypes;
+    SmallVector<Value> arefBufs;
+    for (auto aref : arefs) {
+      arefBufTypes.push_back(aref.getOperands()[0].getType());
+      arefBufs.push_back(aref.getOperands()[0]);
+    }
+    auto lastAref = *llvm::max_element(arefs, [](auto a, auto b) {
+      assert(a->getBlock() == b->getBlock());
+      return a->isBeforeInBlock(b);
+    });
+    OpBuilder builder(lastAref);
+    auto arefTy =
+        ArefType::get(builder.getContext(),
+                      TypeArrayAttr::get(builder.getContext(), arefBufTypes));
+    auto aref =
+        builder.create<ArefCreateOp>(lastAref->getLoc(), arefTy, arefBufs);
+    createCombinedArefOps(putEnterOps, putExitOps, aref, builder, schedule);
+    createCombinedArefOps(getEnterOps, getExitOps, aref, builder, schedule);
+
+    for (auto putEnterOp : putEnterOps)
+      putEnterOp->erase();
+    for (auto putExitOp : putExitOps)
+      putExitOp->erase();
+    for (auto getEnterOp : getEnterOps)
+      getEnterOp->erase();
+    for (auto getExitOp : getExitOps)
+      getExitOp->erase();
+    for (auto aref : arefs)
+      aref->erase();
+  }
+}
+
 class NVWSArefInsertion : public NVWSInsertArefBase<NVWSArefInsertion> {
 public:
   void runOnOperation() override {
@@ -561,6 +794,8 @@ public:
         continue;
 
       runArefInsertionOnLoop(loop, *schedule);
+      combineArefs(loop, *schedule);
+
       schedule->serialize(loop);
     }
   }
