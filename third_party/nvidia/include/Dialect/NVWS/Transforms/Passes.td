@@ -64,7 +64,7 @@ def NVWSLowerAref : Pass<"nvws-lower-aref", "mlir::ModuleOp"> {
   ];
 }
 
-def NVWSInsertAref: Pass<"nvws-inser-aref", "mlir::ModuleOp"> {
+def NVWSInsertAref: Pass<"nvws-insert-aref", "mlir::ModuleOp"> {
   let summary = "insert arefs into the code";
 
   let description = [{

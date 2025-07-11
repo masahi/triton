@@ -67,8 +67,11 @@ MemDescType getArefbufMemDescType(MemDescType memDescType, int32_t AREF_SIZE) {
 
 SmallVector<ProducedValueInfo> getProducedValues(Operation *op,
                                                  WarpSchedule &schedule) {
-  auto partition = schedule.getPartition(op);
   SmallVector<ProducedValueInfo> producedValues;
+  auto partition = schedule.getPartition(op);
+  if (partition == schedule.getRootPartition()) {
+    return producedValues;
+  }
   for (auto result : op->getResults()) {
     producedValues.push_back({partition, result});
   }
@@ -174,6 +177,7 @@ SmallVector<Operation *> createArefPut(OpBuilder &builder, ArefCreateOp aref,
                                        ProducedValueInfo producedValue,
                                        Partition *producerPartition,
                                        WarpSchedule &schedule) {
+  llvm::outs() << "foo\n";
   auto loc = producedValue.result.getLoc();
   auto arefBufType = cast<MemDescType>(aref.getOperand(0).getType());
   Value result = producedValue.result;
@@ -190,7 +194,7 @@ SmallVector<Operation *> createArefPut(OpBuilder &builder, ArefCreateOp aref,
 
   auto producerKind = AsyncOp::NONE;
   SmallVector<Operation *> staleOps;
-
+  llvm::outs() << "bar\n";
   if (isDescLoadAndAlloc(result)) {
     auto alloc = result.getDefiningOp<LocalAllocOp>();
     auto descOp = alloc.getSrc().getDefiningOp();
@@ -213,14 +217,14 @@ SmallVector<Operation *> createArefPut(OpBuilder &builder, ArefCreateOp aref,
   } else {
     llvm_unreachable("Aref for value NYT");
   }
-
+  llvm::outs() << "baz\n";
   auto putExitOp = builder.create<ArefPutExitOp>(
       loc, aref, mkConstant(builder, loc, 0, 32, producerPartition, schedule),
       builder.getArrayAttr(SmallVector<Attribute>{
           AsyncOpAttr::get(aref.getContext(), producerKind)}));
   putExitOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
   schedule.insert(producerPartition, putExitOp);
-
+  llvm::outs() << "bazz\n";
   return staleOps;
 };
 
@@ -358,10 +362,11 @@ void createArefGet(OpBuilder &builder, ArefCreateOp aref, std::string arefTag,
 
 bool insertArefs(OpBuilder &builder, scf::ForOp loop, WarpSchedule &schedule,
                  ProducedValueInfo producedValue, int arefTag) {
-  Partition *consumerPartition;
+  Partition *consumerPartition = nullptr;
   auto [producerPartition, result] = producedValue;
+  llvm::outs() << "produced value\n";
+  producedValue.result.getDefiningOp()->dump();
   assert(producerPartition);
-
   for (auto &useOpnd : result.getUses()) {
     SmallVector<Partition *> userPartitions;
     if (auto forOp = dyn_cast<scf::ForOp>(useOpnd.getOwner())) {
@@ -375,6 +380,11 @@ bool insertArefs(OpBuilder &builder, scf::ForOp loop, WarpSchedule &schedule,
     for (auto partition : userPartitions) {
       if (producerPartition != partition) {
         consumerPartition = partition;
+        llvm::outs() << "consumer op\n";
+	useOpnd.getOwner()->dump();
+	llvm::errs() << "producer partition " << producerPartition->getIndex() << "\n";
+	llvm::errs() << "consumer partition " << consumerPartition->getIndex() << "\n";
+	break;
       }
     }
   }
@@ -459,7 +469,7 @@ void runArefInsertionOnLoop(scf::ForOp loop, WarpSchedule &schedule) {
   loop.walk([&](Operation *op) {
     if (isa<ArefCreateOp, TMEMAllocOp, ArefPutEnterOp, ArefGetEnterOp,
             TMEMLoadOp, TMEMStoreOp, ArefPutExitOp, ArefGetExitOp, scf::YieldOp,
-            triton::FuncOp, triton::ReturnOp>(op))
+	triton::FuncOp, triton::ReturnOp, scf::ForOp>(op))
       return;
 
     opsToArefy.push_back(op);
