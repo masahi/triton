@@ -39,7 +39,7 @@ using namespace triton::nvidia_gpu;
 using namespace triton::nvws;
 
 struct ProducedValueInfo {
-  const Partition *partition;
+  Partition *partition;
   Value result; // result being produced
 };
 
@@ -65,7 +65,7 @@ MemDescType getArefbufMemDescType(MemDescType memDescType, int32_t AREF_SIZE) {
 }
 
 SmallVector<ProducedValueInfo> getProducedValues(Operation *op,
-                                                 const WarpSchedule &schedule) {
+                                                 WarpSchedule &schedule) {
   auto partition = schedule.getPartition(op);
   SmallVector<ProducedValueInfo> producedValues;
   for (auto result : op->getResults()) {
@@ -352,6 +352,103 @@ void createArefGet(OpBuilder &builder, ArefCreateOp aref,
     assert(updatedOperand);
   }
 };
+
+bool insertArefs(OpBuilder &builder, scf::ForOp loop, WarpSchedule& schedule,
+                 ProducedValueInfo producedValue, int arefTag) {
+  Partition* consumerPartition;
+  auto [producerPartition, result] = producedValue;
+  assert(producerPartition);
+
+  for (auto &useOpnd : result.getUses()) {
+    SmallVector<Partition*> userPartitions;
+    if (auto forOp = dyn_cast<scf::ForOp>(useOpnd.getOwner())) {
+      // TODO
+    } else if (auto yieldOp = dyn_cast<scf::YieldOp>(useOpnd.getOwner())) {
+      // TODO
+    } else {
+      userPartitions.push_back(schedule.getPartition((useOpnd.getOwner())));
+    }
+
+    for (auto partition : userPartitions) {
+      if (producerPartition != partition) {
+        consumerPartition = partition;
+      }
+    }
+  }
+  if (!consumerPartition)
+    return false;
+
+  // we also enforce that there is at least one user of the result
+  assert(llvm::count_if(result.getUsers(), [](auto) { return true; }) >= 1);
+
+  // if there are multitiple consumer groups, we need to generate as
+  // separate aref_get per consumer group
+
+  // if there are mutlilpe producer groups, we just pick first group to
+  // generate aref_put,
+
+  // if there are multiple producers, it is possible zip them in
+  // round-robin way, e.g.
+  //      (p1,p2,p3)x(c1,c2,c3,c4,c5,c6) -> (p1,c1) (p2,c2), (p3,c3),
+  //      (p1,c4), (p2,c5) (p3,c6) but it will require multilpe aref
+  //      buffers
+
+  SetVector<Operation *> users(result.getUsers().begin(),
+                               result.getUsers().end());
+
+  ArefCreateOp aref;
+  {
+    OpBuilder::InsertionGuard g(builder);
+    builder.setInsertionPoint(loop);
+    aref = createAref(builder, producedValue);
+  }
+
+  // for now we set put/get right after producing op, e.g.
+
+  //     %val = ..  @gr1
+  //       ..
+  //      .. = val  @gr2
+
+  //      %val = ..   @gr1
+  //      put %val    @gr2
+  //      %val = get  @gr2
+  //        ..
+  //      .. = val    @gr2
+  //
+  // However, in future we may want to consider where consumer is, e.g.
+
+  //   for  {
+  //     %val = ..  @gr1
+  //      if {
+  //           .. = %val @gr2
+  //         }
+  //    }
+
+  //  we may want to have put/get next to consumer, e.g.
+
+  //   for  {
+  //     %val = ..      @gr1
+  //      if {
+  //            put %val   @gr1
+  //            %val = get %gr2
+  //            .. = %val @gr2
+  //         }
+  //   }
+
+  // that can be important if we'd want to support epilogue decoupling
+  // in flattened loops.
+
+  auto tag = std::string("aref_") + std::to_string(arefTag);
+  auto staleOps =
+    createArefPut(builder, aref, tag, producedValue, producerPartition, schedule);
+  createArefGet(builder, aref, tag, producedValue, users, consumerPartition, schedule);
+
+  for (auto op : staleOps) {
+    op->erase();
+  }
+
+  return true;
+}
 
 class NVWSArefInsertion : public NVWSInsertArefBase<NVWSArefInsertion> {
 public:
