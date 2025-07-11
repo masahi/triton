@@ -255,6 +255,104 @@ SetVector<Operation *> getTransitiveConsumers(Operation *op) {
   return opConsumers;
 }
 
+AsyncOp getConsumerKind(const SetVector<Operation *> &consumers) {
+  assert(!consumers.empty());
+  auto consumer = consumers.front();
+  if (isa<WarpGroupDotOp>(consumer)) {
+    return AsyncOp::WGMMA;
+  } else if (auto mmav5 = dyn_cast<MMAv5OpInterface>(consumer)) {
+    return AsyncOp::TC5MMA;
+  }
+  return AsyncOp::NONE;
+}
+
+Operation *getExitInsertPoint(Block *producerBlock,
+                              const SetVector<Operation *> &consumers) {
+  DenseMap<Operation *, int> opOrdering;
+  producerBlock->walk(
+      [&](Operation *op) { opOrdering[op] = opOrdering.size(); });
+
+  SetVector<Operation *> validConsumers;
+  for (auto consumer : consumers) {
+    if (getBlockScope(producerBlock, consumer->getBlock()) !=
+        BlockScope::UNSUPPORTED)
+      validConsumers.insert(consumer);
+  }
+  assert(!validConsumers.empty());
+
+  auto lastConsumer = *llvm::max_element(validConsumers, [&](auto a, auto b) {
+    return opOrdering.at(a) < opOrdering.at(b);
+  });
+
+  auto consumerScope = getBlockScope(producerBlock, lastConsumer->getBlock());
+  if (BlockScope::SAME_BLOCK == consumerScope) {
+    return lastConsumer;
+  } else if (BlockScope::NESTED_INSIDE == consumerScope) {
+    auto regionOp = lastConsumer->getParentOp();
+    while (regionOp->getBlock() != producerBlock) {
+      regionOp = regionOp->getParentOp();
+    }
+    return regionOp;
+  } else {
+    llvm_unreachable("unsupported consumer scope");
+  }
+  return nullptr;
+}
+
+void createArefGet(OpBuilder &builder, ArefCreateOp aref,
+                   std::string arefTag, ProducedValueInfo producedValue,
+                   SetVector<Operation *> users, Partition* consumerPartition,
+		   WarpSchedule& schedule) {
+  OpBuilder::InsertionGuard g(builder);
+  auto loc = producedValue.result.getLoc();
+  auto arefBufType = cast<MemDescType>(aref.getOperand(0).getType());
+
+  Value result = producedValue.result;
+
+  SmallVector<Type> buffers{getDataMemDescType(arefBufType, false)};
+  auto getEnterOp = builder.create<ArefGetEnterOp>(
+      loc, buffers, aref,
+      mkConstant(builder, loc, 0, 32, consumerPartition, schedule));
+  Value dataBuf = getEnterOp.getResults()[0];
+  schedule.insert(consumerPartition, getEnterOp);
+  getEnterOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
+
+  auto createExit = [&](AsyncOp consumerKind) {
+    SmallVector<Attribute> consumerAttr{
+        AsyncOpAttr::get(aref.getContext(), consumerKind)};
+    auto consumersAttr = builder.getArrayAttr(consumerAttr);
+    auto getExitOp = builder.create<ArefGetExitOp>(
+        loc, aref, mkConstant(builder, loc, 0, 32, consumerPartition, schedule),
+        consumersAttr);
+    getExitOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
+    schedule.insert(consumerPartition, getExitOp);
+  };
+
+  Value newOperand;
+  if (auto memDescType = dyn_cast<MemDescType>(result.getType())) {
+    newOperand = dataBuf;
+    auto consumers = getTransitiveConsumers(result.getDefiningOp());
+    auto insertPoint =
+        getExitInsertPoint(result.getDefiningOp()->getBlock(), consumers);
+    builder.setInsertionPointAfter(insertPoint);
+    createExit(getConsumerKind(consumers));
+  } else {
+    llvm_unreachable("unsupported type");
+  }
+
+  // update result operand with newOperand
+  for (auto user : users) {
+    bool updatedOperand = false;
+    for (auto [i, operand] : llvm::enumerate(user->getOperands())) {
+      if (result == operand) {
+        user->setOperand(i, newOperand);
+        updatedOperand = true;
+      }
+    }
+    assert(updatedOperand);
+  }
+};
+
 class NVWSArefInsertion : public NVWSInsertArefBase<NVWSArefInsertion> {
 public:
   void runOnOperation() override {
