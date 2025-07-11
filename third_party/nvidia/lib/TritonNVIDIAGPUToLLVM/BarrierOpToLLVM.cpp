@@ -27,6 +27,7 @@
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+#include "nvidia/include/Dialect/NVWS/IR/Dialect.h"
 
 #include "Utility.h"
 
@@ -257,6 +258,62 @@ struct ArriveBarrierOpConversion
     return success();
   }
 };
+
+// TODO: Refactor with other code paths
+void createTcgen05Commit(ConversionPatternRewriter &rewriter, Location loc,
+                         Value barrier, Value pred) {
+  PTXBuilder ptxBuilder;
+  auto *barrierOperand = ptxBuilder.newAddrOperand(barrier, "r");
+  std::string opcode = "tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64";
+  auto &barrierOp = *ptxBuilder.create<PTXInstr>(opcode);
+  barrierOp(barrierOperand).predicate(pred);
+  ptxBuilder.launch(rewriter, loc, void_ty(rewriter.getContext()));
+}
+
+struct NvwsArriveBarrierOpConversion
+    : public ConvertOpToLLVMPattern<triton::nvws::ArriveBarrierOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  void emitBarrier(std::string instr, LLVM::SharedMemoryObject smemObj,
+                   MLIRContext *ctx, ConversionPatternRewriter &rewriter,
+                   Location loc) const {
+    ::mlir::triton::PTXBuilder ptxBuilder;
+    auto &barSyncOp = *ptxBuilder.create<>(instr);
+    barSyncOp({ptxBuilder.newOperand(smemObj.getBase(), "r")},
+              /*onlyAttachMLIRArgs=*/true);
+    auto voidTy = void_ty(ctx);
+    ptxBuilder.launch(rewriter, loc, voidTy);
+  }
+
+  LogicalResult
+  matchAndRewrite(triton::nvws::ArriveBarrierOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto smemObj = LLVM::getSharedMemoryObjectFromStruct(
+        op.getLoc(), adaptor.getAlloc(),
+        typeConverter->convertType(op.getAlloc().getType().getElementType()),
+        rewriter);
+    auto loc = op.getLoc();
+
+    auto trackedOp = op.getAsyncOp();
+    if (trackedOp == nvws::AsyncOp::TMALoad) {
+      // nop, done by HW
+    } else if (trackedOp == nvws::AsyncOp::TC5MMA ||
+               trackedOp == nvws::AsyncOp::TMEMCopy) {
+      ModuleOp m = op->getParentOfType<ModuleOp>();
+      Value pred = LLVM::NVIDIA::createElectPredicateWarp0(loc, rewriter);
+      createTcgen05Commit(rewriter, loc, smemObj.getBase(), pred);
+    } else if (trackedOp == nvws::AsyncOp::CpAsync) {
+      llvm_unreachable("cpasync support NYI");
+    } else if (trackedOp == nvws::AsyncOp::NONE) {
+      const std::string ptx = "mbarrier.arrive.shared.b64 _, [$0];";
+      emitBarrier(ptx, smemObj, op->getContext(), rewriter, loc);
+    } else {
+      llvm_unreachable("unknown tracked op");
+    }
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
 } // namespace
 
 void mlir::triton::NVIDIA::populateBarrierOpToLLVMPatterns(
@@ -268,4 +325,5 @@ void mlir::triton::NVIDIA::populateBarrierOpToLLVMPatterns(
   patterns.add<WaitBarrierOpConversion>(typeConverter, benefit, targetInfo);
   patterns.add<BarrierExpectConversion>(typeConverter, benefit);
   patterns.add<ArriveBarrierOpConversion>(typeConverter, benefit);
+  patterns.add<NvwsArriveBarrierOpConversion>(typeConverter, benefit);
 }
