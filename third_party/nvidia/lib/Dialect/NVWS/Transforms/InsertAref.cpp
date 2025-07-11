@@ -171,7 +171,7 @@ Value mkConstant(OpBuilder &builder, Location loc, int value, int width,
 
 SmallVector<Operation *>
 createArefPut(OpBuilder &builder, ArefCreateOp aref, std::string arefTag,
-              ProducedValueInfo producedValue, Partition* producerPartition, Schedule& schedule) {
+              ProducedValueInfo producedValue, Partition* producerPartition, WarpSchedule& schedule) {
   auto loc = producedValue.result.getLoc();
   auto arefBufType = cast<MemDescType>(aref.getOperand(0).getType());
   Value result = producedValue.result;
@@ -180,44 +180,44 @@ createArefPut(OpBuilder &builder, ArefCreateOp aref, std::string arefTag,
   SmallVector<Type> buffers{dataBufType};
   SmallVector<Type> tokens{builder.getType<NoneType>()};
 
-  auto putEnterOp = builder.create<ArefPutEnterOp>(
-      loc, buffers, tokens, aref,
-      mkConstant(builder, loc, 0, 32, producerPartition, schedule));
-  schedule.insert(producerPartition, putEnterOp);
-  putEnterOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
-  auto dataBuf = putEnterOp.getBuffers()[0];
+  // auto putEnterOp = builder.create<ArefPutEnterOp>(
+  //     loc, buffers, tokens, aref,
+  //     mkConstant(builder, loc, 0, 32, producerPartition, schedule));
+  // schedule.insert(producerPartition, putEnterOp);
+  // putEnterOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
+  // auto dataBuf = putEnterOp.getBuffers()[0];
 
-  auto producerKind = ArefProducer::NONE;
+  //  auto producerKind = Asyn
   SmallVector<Operation *> staleOps;
 
-  if (isDescLoadAndAlloc(result)) {
-    auto alloc = result.getDefiningOp<LocalAllocOp>();
-    auto descOp = alloc.getSrc().getDefiningOp();
-    createNVWSDescriptorLoadOp(builder, descOp, dataBuf, producerPartition, schedule, loc);
-    producerKind = ArefProducer::TMALDG;
-    staleOps.push_back(alloc);
-    staleOps.push_back(descOp);
-  } else if (isGlobalLoadAndAlloc(result)) {
-    auto alloc = result.getDefiningOp<LocalAllocOp>();
-    auto loadOp = alloc.getSrc().getDefiningOp<triton::LoadOp>();
-    assert(loadOp);
-    auto newLoad = builder.create<AsyncCopyGlobalToLocalOp>(
-        loc, loadOp.getPtr(), dataBuf, loadOp.getMask(), loadOp.getOther(),
-        loadOp.getCache(), loadOp.getEvict(), loadOp.getIsVolatile());
-    schedule.insert(producerPartition, newLoad);
-    producerKind = ArefProducer::LDGSTS;
-    staleOps.push_back(alloc);
-    staleOps.push_back(loadOp);
-  } else {
-    llvm_unreachable("Aref for value NYT");
-  }
+  // if (isDescLoadAndAlloc(result)) {
+  //   auto alloc = result.getDefiningOp<LocalAllocOp>();
+  //   auto descOp = alloc.getSrc().getDefiningOp();
+  //   createNVWSDescriptorLoadOp(builder, descOp, dataBuf, producerPartition, schedule, loc);
+  //   //producerKind = ArefProducer::TMALDG;
+  //   staleOps.push_back(alloc);
+  //   staleOps.push_back(descOp);
+  // } else if (isGlobalLoadAndAlloc(result)) {
+  //   auto alloc = result.getDefiningOp<LocalAllocOp>();
+  //   auto loadOp = alloc.getSrc().getDefiningOp<triton::LoadOp>();
+  //   assert(loadOp);
+  //   auto newLoad = builder.create<AsyncCopyGlobalToLocalOp>(
+  //       loc, loadOp.getPtr(), dataBuf, loadOp.getMask(), loadOp.getOther(),
+  //       loadOp.getCache(), loadOp.getEvict(), loadOp.getIsVolatile());
+  //   schedule.insert(producerPartition, newLoad);
+  //   //    producerKind = ArefProducer::LDGSTS;
+  //   staleOps.push_back(alloc);
+  //   staleOps.push_back(loadOp);
+  // } else {
+  //   llvm_unreachable("Aref for value NYT");
+  // }
 
-  auto putExitOp = builder.create<ArefPutExitOp>(
-						 loc, aref, mkConstant(builder, loc, 0, 32, producerPartition, schedule),
-      builder.getArrayAttr(SmallVector<Attribute>{
-          ArefProducerAttr::get(aref.getContext(), producerKind)}));
-  putExitOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
-  schedule.insert(producerPartition, putExitOp);
+  // auto putExitOp = builder.create<ArefPutExitOp>(
+  // 						 loc, aref, mkConstant(builder, loc, 0, 32, producerPartition, schedule),
+  //     builder.getArrayAttr(SmallVector<Attribute>{
+  //         ArefProducerAttr::get(aref.getContext(), producerKind)}));
+  // putExitOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
+  // schedule.insert(producerPartition, putExitOp);
 
   return staleOps;
 };
