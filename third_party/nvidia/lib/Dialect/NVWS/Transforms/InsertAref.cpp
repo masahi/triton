@@ -96,19 +96,59 @@ ArefCreateOp createAref(OpBuilder &builder, ProducedValueInfo &producedValue) {
 
   if (auto memDescType = dyn_cast<MemDescType>(result.getType())) {
     arefBufType = getArefbufMemDescType(memDescType, 1);
-    auto loc = producedValue.result.getLoc();
-
-    auto arefTy =
-        ArefType::get(builder.getContext(),
-                      TypeArrayAttr::get(builder.getContext(), arefBufType));
-    assert((isa<SharedMemorySpaceAttr>(arefBufType.getMemorySpace())));
-    auto alloc = createAlloc(builder, loc, arefBufType, Value());
-    alloc->setAttr("aref_buffer", builder.getUnitAttr());
-    return builder.create<ArefCreateOp>(loc, arefTy, alloc->getResult(0));
-    ;
+  } else if (auto tensorType = dyn_cast<RankedTensorType>(result.getType())) {
+    // if result is a value, create memdesctype for location where value will
+    // be stored
+    MemDescType memDescType;
+    Attribute SharedMemorySpace =
+        SharedMemorySpaceAttr::get(tensorType.getContext());
+    if (auto load = result.getDefiningOp<triton::DescriptorOpInterface>()) {
+      auto encoding =
+          getEncodingFromDescriptor(load, tensorType, load.getDesc());
+      memDescType =
+          MemDescType::get(tensorType.getShape(), tensorType.getElementType(),
+                           encoding, SharedMemorySpace);
+    } else {
+      for (auto user : producedValue.result.getUsers()) {
+        // if user is localAlloc/localStore, uses their memDescType
+        if (auto localAlloc = dyn_cast<LocalAllocOp>(user)) {
+          memDescType = cast<MemDescType>(localAlloc.getResult().getType());
+          break;
+        } else if (auto localStore = dyn_cast<LocalStoreOp>(user)) {
+          memDescType = cast<MemDescType>(localStore.getDst().getType());
+          break;
+        }
+      }
+    }
+    if (!memDescType) {
+      // The right smem encoding cannot be inferred from the IR. This can
+      // happen, for example, in an attention kernel where smem is used to
+      // communicate between different warp groups. We need to pick a new
+      // encoding for such cases. For now, use a non-swizzled layout.
+      // TODO: Use a swizzled one when possible
+      auto CTALayout = getCTALayout(tensorType.getEncoding());
+      auto newOrder = getOrderForMemory(tensorType);
+      auto encoding = SwizzledSharedEncodingAttr::get(
+          tensorType.getContext(), 1, 1, 1, newOrder, CTALayout);
+      memDescType =
+          MemDescType::get(tensorType.getShape(), tensorType.getElementType(),
+                           encoding, SharedMemorySpace);
+    }
+    arefBufType = getArefbufMemDescType(memDescType, 1);
+  } else {
+    // need to support scalar types, similarly  to ranked tensor types
+    llvm_unreachable("unsupported type");
   }
 
-  return nullptr;
+  auto loc = producedValue.result.getLoc();
+
+  auto arefTy =
+      ArefType::get(builder.getContext(),
+                    TypeArrayAttr::get(builder.getContext(), arefBufType));
+  assert((isa<SharedMemorySpaceAttr>(arefBufType.getMemorySpace())));
+  auto alloc = createAlloc(builder, loc, arefBufType, Value());
+  alloc->setAttr("aref_buffer", builder.getUnitAttr());
+  return builder.create<ArefCreateOp>(loc, arefTy, alloc->getResult(0));
 }
 
 bool isDescLoadAndAlloc(Value result) {
@@ -214,19 +254,22 @@ SmallVector<Operation *> createArefPut(OpBuilder &builder, ArefCreateOp aref,
     staleOps.push_back(alloc);
     staleOps.push_back(descOp);
   } else if (isGlobalLoadAndAlloc(result)) {
-    auto alloc = result.getDefiningOp<LocalAllocOp>();
-    auto loadOp = alloc.getSrc().getDefiningOp<triton::LoadOp>();
-    assert(loadOp);
-    auto newLoad = builder.create<AsyncCopyGlobalToLocalOp>(
-        loc, loadOp.getPtr(), dataBuf, loadOp.getMask(), loadOp.getOther(),
-        loadOp.getCache(), loadOp.getEvict(), loadOp.getIsVolatile());
-    schedule.insert(producerPartition, newLoad);
-    producerKind = AsyncOp::CpAsync;
-    staleOps.push_back(alloc);
-    staleOps.push_back(loadOp);
+    llvm_unreachable("cpasync not supported yet");
+  } else if (auto tensorType = dyn_cast<RankedTensorType>(result.getType())) {
+    auto op = result.getDefiningOp();
+    if (op && isa<triton::DescriptorOpInterface>(op)) {
+      createNVWSDescriptorLoadOp(builder, op, dataBuf, producerPartition, schedule, loc);
+      producerKind = AsyncOp::TMALoad;
+    } else if (op && isa<triton::LoadOp>(op)) {
+      llvm_unreachable("cpasync not supported yet");
+    } else {
+      auto storeOp = builder.create<LocalStoreOp>(loc, result, dataBuf);
+      schedule.insert(producerPartition, storeOp);
+    }
   } else {
-    llvm_unreachable("Aref for value NYT");
+    llvm_unreachable("unsupported type");
   }
+
   auto putExitOp = builder.create<ArefPutExitOp>(
       loc, aref, mkConstant(builder, loc, 0, 32, producerPartition, schedule),
       builder.getArrayAttr(SmallVector<Attribute>{
@@ -351,6 +394,12 @@ void createArefGet(OpBuilder &builder, ArefCreateOp aref, std::string arefTag,
         getExitInsertPoint(result.getDefiningOp()->getBlock(), consumers);
     builder.setInsertionPointAfter(insertPoint);
     createExit(getConsumerKind(consumers));
+  } else if (auto tensorType = dyn_cast<RankedTensorType>(result.getType())) {
+    auto localLoadOp =
+        builder.create<LocalLoadOp>(loc, tensorType, dataBuf);
+    newOperand = localLoadOp.getResult();
+    schedule.insert(consumerPartition, localLoadOp);
+    createExit(AsyncOp::NONE);
   } else {
     llvm_unreachable("unsupported type");
   }
@@ -372,8 +421,8 @@ bool insertArefs(OpBuilder &builder, scf::ForOp loop, WarpSchedule &schedule,
                  ProducedValueInfo producedValue, int arefTag) {
   Partition *consumerPartition = nullptr;
   auto [producerPartition, result] = producedValue;
-  llvm::outs() << "produced value\n";
-  producedValue.result.getDefiningOp()->dump();
+  // llvm::outs() << "produced value\n";
+  // producedValue.result.getDefiningOp()->dump();
   assert(producerPartition);
   for (auto &useOpnd : result.getUses()) {
     SmallVector<Partition *> userPartitions;
