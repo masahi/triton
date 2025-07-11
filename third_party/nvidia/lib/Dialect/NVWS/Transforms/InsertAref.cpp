@@ -142,12 +142,14 @@ void createNVWSDescriptorLoadOp(OpBuilder &builder, Operation *ttDescLoadOp,
     auto newDescLoad = builder.create<triton::nvws::DescriptorLoadOp>(
         loc, descLoad.getDesc(), descLoad.getIndices(), txCount, dataBuf,
         descLoad.getCache(), descLoad.getEvict());
+    newDescLoad->setAttrs(descLoad->getAttrs());
     schedule.insert(producerPartition, newDescLoad);
   } else if (auto descGather =
                  dyn_cast<triton::DescriptorGatherOp>(ttDescLoadOp)) {
     auto newDescGather = builder.create<triton::nvws::DescriptorGatherOp>(
         loc, descGather.getDesc(), descGather.getXOffsets(),
         descGather.getYOffset(), txCount, dataBuf);
+    newDescGather->setAttrs(descGather->getAttrs());
     schedule.insert(producerPartition, newDescGather);
   } else {
     llvm_unreachable("unknown descriptor op.");
@@ -177,7 +179,6 @@ SmallVector<Operation *> createArefPut(OpBuilder &builder, ArefCreateOp aref,
                                        ProducedValueInfo producedValue,
                                        Partition *producerPartition,
                                        WarpSchedule &schedule) {
-  llvm::outs() << "foo\n";
   auto loc = producedValue.result.getLoc();
   auto arefBufType = cast<MemDescType>(aref.getOperand(0).getType());
   Value result = producedValue.result;
@@ -194,7 +195,6 @@ SmallVector<Operation *> createArefPut(OpBuilder &builder, ArefCreateOp aref,
 
   auto producerKind = AsyncOp::NONE;
   SmallVector<Operation *> staleOps;
-  llvm::outs() << "bar\n";
   if (isDescLoadAndAlloc(result)) {
     auto alloc = result.getDefiningOp<LocalAllocOp>();
     auto descOp = alloc.getSrc().getDefiningOp();
@@ -217,14 +217,12 @@ SmallVector<Operation *> createArefPut(OpBuilder &builder, ArefCreateOp aref,
   } else {
     llvm_unreachable("Aref for value NYT");
   }
-  llvm::outs() << "baz\n";
   auto putExitOp = builder.create<ArefPutExitOp>(
       loc, aref, mkConstant(builder, loc, 0, 32, producerPartition, schedule),
       builder.getArrayAttr(SmallVector<Attribute>{
           AsyncOpAttr::get(aref.getContext(), producerKind)}));
   putExitOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
   schedule.insert(producerPartition, putExitOp);
-  llvm::outs() << "bazz\n";
   return staleOps;
 };
 
@@ -364,8 +362,8 @@ bool insertArefs(OpBuilder &builder, scf::ForOp loop, WarpSchedule &schedule,
                  ProducedValueInfo producedValue, int arefTag) {
   Partition *consumerPartition = nullptr;
   auto [producerPartition, result] = producedValue;
-  llvm::outs() << "produced value\n";
-  producedValue.result.getDefiningOp()->dump();
+  // llvm::outs() << "produced value\n";
+  // producedValue.result.getDefiningOp()->dump();
   assert(producerPartition);
   for (auto &useOpnd : result.getUses()) {
     SmallVector<Partition *> userPartitions;
@@ -380,10 +378,10 @@ bool insertArefs(OpBuilder &builder, scf::ForOp loop, WarpSchedule &schedule,
     for (auto partition : userPartitions) {
       if (producerPartition != partition) {
         consumerPartition = partition;
-        llvm::outs() << "consumer op\n";
-	useOpnd.getOwner()->dump();
-	llvm::errs() << "producer partition " << producerPartition->getIndex() << "\n";
-	llvm::errs() << "consumer partition " << consumerPartition->getIndex() << "\n";
+	//        llvm::outs() << "consumer op\n";
+	//	useOpnd.getOwner()->dump();
+	// llvm::errs() << "producer partition " << producerPartition->getIndex() << "\n";
+	// llvm::errs() << "consumer partition " << consumerPartition->getIndex() << "\n";
 	break;
       }
     }
