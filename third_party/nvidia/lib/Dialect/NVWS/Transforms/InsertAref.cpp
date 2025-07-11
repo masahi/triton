@@ -17,6 +17,7 @@
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Partition.h"
+#include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/Transforms/TMAUtilities.h"
@@ -150,17 +151,16 @@ void createNVWSDescriptorLoadOp(OpBuilder &builder, Operation *ttDescLoadOp,
   }
 }
 
-MemDescType getDataMemDescType(MemDescType memDescType,
-                                    bool mutableMemory) {
+MemDescType getDataMemDescType(MemDescType memDescType, bool mutableMemory) {
   auto shape = memDescType.getShape();
   SmallVector<int64_t> dataShape(shape.begin() + 1, shape.end());
   return MemDescType::get(dataShape, memDescType.getElementType(),
-                               memDescType.getEncoding(),
-                               memDescType.getMemorySpace(), mutableMemory);
+                          memDescType.getEncoding(),
+                          memDescType.getMemorySpace(), mutableMemory);
 };
 
 Value mkConstant(OpBuilder &builder, Location loc, int value, int width,
-                 Partition* partition, WarpSchedule& schedule) {
+                 Partition *partition, WarpSchedule &schedule) {
   auto constValue = builder.create<arith::ConstantIntOp>(loc, value, width);
   if (partition) {
     schedule.insert(partition, constValue);
@@ -169,9 +169,11 @@ Value mkConstant(OpBuilder &builder, Location loc, int value, int width,
   return constValue;
 }
 
-SmallVector<Operation *>
-createArefPut(OpBuilder &builder, ArefCreateOp aref, std::string arefTag,
-              ProducedValueInfo producedValue, Partition* producerPartition, WarpSchedule& schedule) {
+SmallVector<Operation *> createArefPut(OpBuilder &builder, ArefCreateOp aref,
+                                       std::string arefTag,
+                                       ProducedValueInfo producedValue,
+                                       Partition *producerPartition,
+                                       WarpSchedule &schedule) {
   auto loc = producedValue.result.getLoc();
   auto arefBufType = cast<MemDescType>(aref.getOperand(0).getType());
   Value result = producedValue.result;
@@ -192,7 +194,8 @@ createArefPut(OpBuilder &builder, ArefCreateOp aref, std::string arefTag,
   if (isDescLoadAndAlloc(result)) {
     auto alloc = result.getDefiningOp<LocalAllocOp>();
     auto descOp = alloc.getSrc().getDefiningOp();
-    createNVWSDescriptorLoadOp(builder, descOp, dataBuf, producerPartition, schedule, loc);
+    createNVWSDescriptorLoadOp(builder, descOp, dataBuf, producerPartition,
+                               schedule, loc);
     producerKind = AsyncOp::TMALoad;
     staleOps.push_back(alloc);
     staleOps.push_back(descOp);
@@ -299,10 +302,10 @@ Operation *getExitInsertPoint(Block *producerBlock,
   return nullptr;
 }
 
-void createArefGet(OpBuilder &builder, ArefCreateOp aref,
-                   std::string arefTag, ProducedValueInfo producedValue,
-                   SetVector<Operation *> users, Partition* consumerPartition,
-		   WarpSchedule& schedule) {
+void createArefGet(OpBuilder &builder, ArefCreateOp aref, std::string arefTag,
+                   ProducedValueInfo producedValue,
+                   SetVector<Operation *> users, Partition *consumerPartition,
+                   WarpSchedule &schedule) {
   OpBuilder::InsertionGuard g(builder);
   auto loc = producedValue.result.getLoc();
   auto arefBufType = cast<MemDescType>(aref.getOperand(0).getType());
@@ -353,14 +356,14 @@ void createArefGet(OpBuilder &builder, ArefCreateOp aref,
   }
 };
 
-bool insertArefs(OpBuilder &builder, scf::ForOp loop, WarpSchedule& schedule,
+bool insertArefs(OpBuilder &builder, scf::ForOp loop, WarpSchedule &schedule,
                  ProducedValueInfo producedValue, int arefTag) {
-  Partition* consumerPartition;
+  Partition *consumerPartition;
   auto [producerPartition, result] = producedValue;
   assert(producerPartition);
 
   for (auto &useOpnd : result.getUses()) {
-    SmallVector<Partition*> userPartitions;
+    SmallVector<Partition *> userPartitions;
     if (auto forOp = dyn_cast<scf::ForOp>(useOpnd.getOwner())) {
       // TODO
     } else if (auto yieldOp = dyn_cast<scf::YieldOp>(useOpnd.getOwner())) {
@@ -439,9 +442,10 @@ bool insertArefs(OpBuilder &builder, scf::ForOp loop, WarpSchedule& schedule,
   // in flattened loops.
 
   auto tag = std::string("aref_") + std::to_string(arefTag);
-  auto staleOps =
-    createArefPut(builder, aref, tag, producedValue, producerPartition, schedule);
-  createArefGet(builder, aref, tag, producedValue, users, consumerPartition, schedule);
+  auto staleOps = createArefPut(builder, aref, tag, producedValue,
+                                producerPartition, schedule);
+  createArefGet(builder, aref, tag, producedValue, users, consumerPartition,
+                schedule);
 
   for (auto op : staleOps) {
     op->erase();
@@ -450,11 +454,48 @@ bool insertArefs(OpBuilder &builder, scf::ForOp loop, WarpSchedule& schedule,
   return true;
 }
 
+void runArefInsertionOnLoop(scf::ForOp loop, WarpSchedule &schedule) {
+  SmallVector<Operation *> opsToArefy;
+  loop.walk([&](Operation *op) {
+    if (isa<ArefCreateOp, TMEMAllocOp, ArefPutEnterOp, ArefGetEnterOp,
+            TMEMLoadOp, TMEMStoreOp, ArefPutExitOp, ArefGetExitOp, scf::YieldOp,
+            triton::FuncOp, triton::ReturnOp>(op))
+      return;
+
+    opsToArefy.push_back(op);
+  });
+
+  int arefTag = 0;
+  auto body = loop.getBody();
+
+  for (auto op : opsToArefy) {
+    // otherwise we need to place put/get
+    auto producedValues = getProducedValues(op, schedule);
+    for (auto producedValue : producedValues) {
+      OpBuilder builder(op);
+      builder.setInsertionPointAfter(op);
+      if (insertArefs(builder, loop, schedule, producedValue, arefTag))
+        arefTag++;
+    }
+  }
+}
+
 class NVWSArefInsertion : public NVWSInsertArefBase<NVWSArefInsertion> {
 public:
   void runOnOperation() override {
-    // auto mod = getOperation();
-    // mod.walk([&](triton::FuncOp funcOp) { runArefInsertionOnFunc(funcOp); });
+    SmallVector<scf::ForOp> loops;
+    getOperation().walk([&](scf::ForOp loop) {
+      if (loop->hasAttr(triton::kWarpSpecializeAttrName))
+        loops.push_back(loop);
+    });
+    for (scf::ForOp loop : loops) {
+      FailureOr<WarpSchedule> schedule = WarpSchedule::deserialize(loop);
+      if (failed(schedule))
+        continue;
+
+      runArefInsertionOnLoop(loop, *schedule);
+      schedule->serialize(loop);
+    }
   }
 };
 } // namespace
