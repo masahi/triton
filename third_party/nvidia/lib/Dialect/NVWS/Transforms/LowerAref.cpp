@@ -38,6 +38,7 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonNvidiaGPU/Transforms/TMAUtilities.h"
 
 using namespace mlir::triton;
 using namespace mlir::triton::gpu;
@@ -248,19 +249,40 @@ SmallVector<Value> getSubViews(ArefValue arefVal, Value stage, Location loc,
   return views;
 }
 
+void createTMALoad(triton::nvws::DescriptorLoadOp op, OpBuilder &rewriter,
+                   Value barrierAlloc, Value pred) {
+  auto indices = translateTMAIndices(
+      rewriter, op.getLoc(),
+      op.getDesc().getType().getBlockType().getEncoding(), op.getIndices());
+  rewriter.create<triton::nvidia_gpu::AsyncTMACopyGlobalToLocalOp>(
+      op.getLoc(), op.getDesc(), indices, barrierAlloc, op.getResult(), pred);
+};
+
+void createTMAGather(triton::nvws::DescriptorGatherOp op, OpBuilder &rewriter,
+                     Value barrierAlloc, Value pred) {
+  rewriter.create<triton::nvidia_gpu::AsyncTMAGatherOp>(
+      op.getLoc(), op.getDesc(), op.getXOffsets(), op.getYOffset(),
+      barrierAlloc, op.getResult(), pred);
+}
+
 void lowerAsyncLoads(ArefPutEnterOp op, PatternRewriter &rewriter,
                      ArefValue arefVal) {
   auto loc = op.getLoc();
   // for now handle TMA loads in PutEnterOp
   SmallVector<Operation *> loadOps;
-  for (auto result : op.getResults())
+  int txCount = 0;
+  for (auto result : op.getResults()) {
     for (auto user : result.getUsers()) {
-      // Temporary workaround for lit testing: handle TMA loads here until a
-      // dedicated tma_load op is added to the NVWS dialect
-      if (user->getName().getStringRef() == "tma_load")
-        loadOps.push_back(user);
+      if (auto loadOp =
+              dyn_cast<triton::nvws::DescriptorLoadOpInterface>(user)) {
+        loadOps.push_back(loadOp);
+        txCount += loadOp.getTxCount();
+      }
     }
+  }
+
   assert(loadOps.size() <= op.getResults().size());
+
   if (loadOps.empty())
     return;
 
@@ -273,10 +295,10 @@ void lowerAsyncLoads(ArefPutEnterOp op, PatternRewriter &rewriter,
   //   aref_put.exit %aref[%exit_idx] {aref_tag = tag}
 
   // locate the matching aref_put.exit with the same tag, to get full barrier
-  ArefPutExitOp arefPutExitOp;
+  nvws::ArefPutExitOp arefPutExitOp;
   auto arefTag = op->getAttrOfType<StringAttr>("aref_tag").str();
   for (auto user : op.getAref().getUsers()) {
-    if (auto exitOp = dyn_cast<ArefPutExitOp>(user)) {
+    if (auto exitOp = dyn_cast<nvws::ArefPutExitOp>(user)) {
       if (exitOp->getAttrOfType<StringAttr>("aref_tag").str() == arefTag) {
         arefPutExitOp = exitOp;
         break;
@@ -290,9 +312,30 @@ void lowerAsyncLoads(ArefPutEnterOp op, PatternRewriter &rewriter,
   Value fullBarrier =
       getFullBarrier(rewriter, loc, arefVal, arefPutExitOp.getIndex());
   Value pred = rewriter.create<arith::ConstantIntOp>(loc, 1, 1);
-  rewriter.create<triton::nvidia_gpu::BarrierExpectOp>(loc, fullBarrier, 0,
-                                                       pred);
-  return;
+  rewriter.create<triton::nvidia_gpu::BarrierExpectOp>(loc, fullBarrier,
+                                                       txCount, pred);
+
+  // Note: it is essential to set the insertion point right before putExitOp
+  // otherwise one of the MOE kernel fails to compile, and if it is set
+  // somewhere else it would result in  perf regression from:
+  //
+  // $ python python/tutorials/10-block-scaled-matmul-persistent.py --bench
+  //   --ws --K_range 512 8192
+  //
+  OpBuilder::InsertionGuard g(rewriter);
+  rewriter.setInsertionPoint(arefPutExitOp);
+  for (auto loadOp : loadOps) {
+    Value pred = rewriter.create<arith::ConstantIntOp>(loc, 1, 1);
+    if (auto descLoad = dyn_cast<triton::nvws::DescriptorLoadOp>(loadOp)) {
+      createTMALoad(descLoad, rewriter, fullBarrier, pred);
+    } else if (auto descGather =
+                   dyn_cast<triton::nvws::DescriptorGatherOp>(loadOp)) {
+      createTMAGather(descGather, rewriter, fullBarrier, pred);
+    } else {
+      llvm_unreachable("Unknown load op");
+    }
+    loadOp->erase();
+  }
 }
 
 void waitOnBarrier(PatternRewriter &rewriter, Location loc, Value mbar,
@@ -306,7 +349,7 @@ void waitOnBarrier(PatternRewriter &rewriter, Location loc, Value mbar,
       loc, phase->getResult(0),
       rewriter.create<arith::ConstantIntOp>(loc, 1, 32));
   phase->setAttr(attrName, rewriter.getUnitAttr());
-  if (isPut != firstGet) {
+  if (isPut || firstGet) {
     // if put or get first, we need to xor the phase with 1
     phase = rewriter.create<arith::XOrIOp>(
         loc, phase->getResult(0),
@@ -340,7 +383,7 @@ LogicalResult rewritePutEnterOp(ArefCreateOp arefOp, ArefPutEnterOp op,
   auto views = getSubViews(arefVal, stage, loc, rewriter);
   assert(views.size() == op.getResults().size());
 
-  // TMA load need special handling as it requires fullMbarrier that
+  // TMA needs special handling as it requires fullMbarrier that
   // we need to get from matching ArefPutExitOp
   lowerAsyncLoads(op, rewriter, arefVal);
 
@@ -349,6 +392,22 @@ LogicalResult rewritePutEnterOp(ArefCreateOp arefOp, ArefPutEnterOp op,
     op.getResult(i).replaceAllUsesWith(views[i]);
 
   return success();
+}
+
+static MemDescType getAsMutable(MemDescType type) {
+  return MemDescType::get(type.getShape(), type.getElementType(),
+                          type.getEncoding(), type.getMemorySpace(),
+                          /*mutableMemory=*/true);
+}
+
+static void propagateMutability(Value value) {
+  for (Operation *user : value.getUsers()) {
+    if (user->hasTrait<OpTrait::MemDescViewTrait>()) {
+      user->getResult(0).setType(
+          getAsMutable(cast<MemDescType>(user->getResult(0).getType())));
+      propagateMutability(user->getResult(0));
+    }
+  }
 }
 
 LogicalResult rewriteGetEnterOp(ArefCreateOp arefOp, ArefGetEnterOp op,
@@ -364,8 +423,10 @@ LogicalResult rewriteGetEnterOp(ArefCreateOp arefOp, ArefGetEnterOp op,
   auto views = getSubViews(arefVal, stage, loc, rewriter);
   assert(views.size() == op.getResults().size());
 
-  for (int i = 0; i < arefVal.buffers.size(); ++i)
+  for (int i = 0; i < arefVal.buffers.size(); ++i) {
     op.getResult(i).replaceAllUsesWith(views[i]);
+    propagateMutability(views[i]);
+  }
 
   return success();
 }
@@ -633,7 +694,6 @@ template <> struct ArefIndex<> {
 };
 
 // ----------------------------------------------------------------------------
-
 } // anonymous namespace
 
 class NVWSLowerAref : public impl::NVWSLowerArefBase<NVWSLowerAref> {
