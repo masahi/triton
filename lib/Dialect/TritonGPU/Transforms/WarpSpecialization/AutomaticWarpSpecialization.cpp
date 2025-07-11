@@ -44,6 +44,10 @@ void AutomaticWarpSpecialization::runOnOperation() {
   pm.addPass(createSCCPPass());
   pm.addPass(createCSEPass());
   pm.addPass(createTritonGPUPartitionLoops());
+  // aref optimize
+  pm.addPass(mlir::triton::createNVWSLowerAref()); // depth
+  pm.addPass(mlir::triton::createNVWSLowerWarpGroup());
+
   if (failed(runPipeline(pm, getOperation())))
     return signalPassFailure();
 

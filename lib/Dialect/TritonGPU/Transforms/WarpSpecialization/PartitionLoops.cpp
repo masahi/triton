@@ -463,6 +463,7 @@ LogicalResult triton::gpu::partitionLoop(scf::ForOp loop) {
     }
   }
 
+  //  loop->getParentOfType<ModuleOp>().dump();
   loop->erase();
 
   return success();
@@ -500,9 +501,9 @@ void PartitionLoops::runOnOperation() {
       return signalPassFailure();
   }
 
-  OpPassManager pm;
-  pm.addPass(mlir::triton::createNVWSLowerWarpGroup());
+  // OpPassManager pm;
+  // pm.addPass(mlir::triton::createNVWSLowerWarpGroup());
 
-  if (failed(runPipeline(pm, getOperation())))
-    return signalPassFailure();
+  // if (failed(runPipeline(pm, getOperation())))
+  //   return signalPassFailure();
 }

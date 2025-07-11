@@ -65,10 +65,20 @@ MemDescType getArefbufMemDescType(MemDescType memDescType, int32_t AREF_SIZE) {
                           memDescType.getMemorySpace(), true);
 }
 
+Partition *getPartition(Operation *op, WarpSchedule &schedule) {
+  while (op && !schedule.getPartition(op)) {
+    op = op->getParentOp();
+  }
+  if (op) {
+    return schedule.getPartition(op);
+  }
+  return nullptr;
+}
+
 SmallVector<ProducedValueInfo> getProducedValues(Operation *op,
                                                  WarpSchedule &schedule) {
   SmallVector<ProducedValueInfo> producedValues;
-  auto partition = schedule.getPartition(op);
+  auto partition = getPartition(op, schedule);
   if (partition == schedule.getRootPartition()) {
     return producedValues;
   }
@@ -362,8 +372,8 @@ bool insertArefs(OpBuilder &builder, scf::ForOp loop, WarpSchedule &schedule,
                  ProducedValueInfo producedValue, int arefTag) {
   Partition *consumerPartition = nullptr;
   auto [producerPartition, result] = producedValue;
-  // llvm::outs() << "produced value\n";
-  // producedValue.result.getDefiningOp()->dump();
+  llvm::outs() << "produced value\n";
+  producedValue.result.getDefiningOp()->dump();
   assert(producerPartition);
   for (auto &useOpnd : result.getUses()) {
     SmallVector<Partition *> userPartitions;
@@ -467,7 +477,7 @@ void runArefInsertionOnLoop(scf::ForOp loop, WarpSchedule &schedule) {
   loop.walk([&](Operation *op) {
     if (isa<ArefCreateOp, TMEMAllocOp, ArefPutEnterOp, ArefGetEnterOp,
             TMEMLoadOp, TMEMStoreOp, ArefPutExitOp, ArefGetExitOp, scf::YieldOp,
-	triton::FuncOp, triton::ReturnOp, scf::ForOp>(op))
+	triton::FuncOp, triton::ReturnOp, scf::ForOp, scf::IfOp>(op))
       return;
 
     opsToArefy.push_back(op);
