@@ -75,6 +75,21 @@ Partition *getPartition(Operation *op, WarpSchedule &schedule) {
   return nullptr;
 }
 
+bool isDescLoadAndAlloc(Value result) {
+  auto alloc = result.getDefiningOp<LocalAllocOp>();
+  if (!alloc)
+    return false;
+  return alloc.getSrc().getDefiningOp<triton::DescriptorOpInterface>() !=
+         nullptr;
+}
+
+bool isGlobalLoadAndAlloc(Value result) {
+  auto alloc = result.getDefiningOp<LocalAllocOp>();
+  if (!alloc)
+    return false;
+  return alloc.getSrc().getDefiningOp<triton::LoadOp>() != nullptr;
+}
+
 SmallVector<ProducedValueInfo> getProducedValues(Operation *op,
                                                  WarpSchedule &schedule) {
   SmallVector<ProducedValueInfo> producedValues;
@@ -83,8 +98,7 @@ SmallVector<ProducedValueInfo> getProducedValues(Operation *op,
     return producedValues;
   }
   for (auto result : op->getResults()) {
-    // avoid the 1st MMA in attention
-    if (!isa<AsyncTokenType>(result.getType())) {
+    if (isDescLoadAndAlloc(result)) {
       producedValues.push_back({partition, result});
     }
   }
@@ -152,21 +166,6 @@ ArefCreateOp createAref(OpBuilder &builder, ProducedValueInfo &producedValue) {
   auto alloc = createAlloc(builder, loc, arefBufType, Value());
   alloc->setAttr("aref_buffer", builder.getUnitAttr());
   return builder.create<ArefCreateOp>(loc, arefTy, alloc->getResult(0));
-}
-
-bool isDescLoadAndAlloc(Value result) {
-  auto alloc = result.getDefiningOp<LocalAllocOp>();
-  if (!alloc)
-    return false;
-  return alloc.getSrc().getDefiningOp<triton::DescriptorOpInterface>() !=
-         nullptr;
-}
-
-bool isGlobalLoadAndAlloc(Value result) {
-  auto alloc = result.getDefiningOp<LocalAllocOp>();
-  if (!alloc)
-    return false;
-  return alloc.getSrc().getDefiningOp<triton::LoadOp>() != nullptr;
 }
 
 int getTxCount(Operation *descOp) {
