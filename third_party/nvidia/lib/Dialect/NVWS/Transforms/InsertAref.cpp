@@ -393,7 +393,11 @@ void createArefGet(OpBuilder &builder, ArefCreateOp aref, std::string arefTag,
     auto insertPoint =
         getExitInsertPoint(result.getDefiningOp()->getBlock(), consumers);
     builder.setInsertionPointAfter(insertPoint);
-    createExit(getConsumerKind(consumers));
+    auto kind = getConsumerKind(consumers);
+    createExit(kind);
+    if (auto mmav5 = dyn_cast<MMAv5OpInterface>(consumers.front())) {
+      mmav5.setIsAsync(true);
+    }
   } else if (auto tensorType = dyn_cast<RankedTensorType>(result.getType())) {
     auto localLoadOp =
         builder.create<LocalLoadOp>(loc, tensorType, dataBuf);
