@@ -260,6 +260,7 @@ SmallVector<Operation *> createArefPut(OpBuilder &builder, ArefCreateOp aref,
     if (op && isa<triton::DescriptorOpInterface>(op)) {
       createNVWSDescriptorLoadOp(builder, op, dataBuf, producerPartition, schedule, loc);
       producerKind = AsyncOp::TMALoad;
+      staleOps.push_back(op);
     } else if (op && isa<triton::LoadOp>(op)) {
       llvm_unreachable("cpasync not supported yet");
     } else {
