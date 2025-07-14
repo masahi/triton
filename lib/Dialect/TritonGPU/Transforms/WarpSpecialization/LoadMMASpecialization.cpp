@@ -762,12 +762,10 @@ static LogicalResult pipelineMMA(scf::ForOp &loop, PipelinedMMA &mma,
     if (node.barNext) {
       if (mmaOp == node.op) {
         b.setInsertionPoint(mmaOp);
-        if (false) {
-          Value bar = createSingleBufferView(b, node.barNext, node.index);
-          mmaOp.addCompletionBarrier(bar, userPred);
-        } else {
-	  mmaOp.setIsAsync(true);
-	}
+        Value bar = createSingleBufferView(b, node.barNext, node.index);
+        mmaOp.addCompletionBarrier(bar, userPred);
+	// TODO: Do this elsewhere
+        mmaOp.setIsAsync(true);
       } else {
         b.setInsertionPointAfter(lastOp);
         if (isa<scf::IfOp>(lastOp->getParentOp()))
