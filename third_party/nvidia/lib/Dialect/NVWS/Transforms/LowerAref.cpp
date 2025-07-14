@@ -693,7 +693,97 @@ template <> struct ArefIndex<> {
   }
 };
 
-// ----------------------------------------------------------------------------
+MemDescType getDataMemDescType(MemDescType memDescType, bool mutableMemory) {
+  auto shape = memDescType.getShape();
+  SmallVector<int64_t> dataShape(shape.begin() + 1, shape.end());
+  return MemDescType::get(dataShape, memDescType.getElementType(),
+                          memDescType.getEncoding(),
+                          memDescType.getMemorySpace(), mutableMemory);
+};
+
+Operation *createAlloc(OpBuilder &builder, Location loc,
+                       MemDescType memDescType, Value src) {
+  if (isa<SharedMemorySpaceAttr>(memDescType.getMemorySpace()))
+    return builder.create<LocalAllocOp>(loc, memDescType, src);
+  else {
+    assert(isa<triton::nvidia_gpu::TensorMemorySpaceAttr>(
+        memDescType.getMemorySpace()));
+    return builder.create<triton::nvidia_gpu::TMEMAllocOp>(loc, memDescType,
+                                                           src);
+  }
+}
+
+MemDescType getArefbufMemDescType(MemDescType memDescType, int32_t AREF_SIZE) {
+  auto shape = memDescType.getShape();
+  SmallVector<int64_t> bufferShape(shape.begin(), shape.end());
+  bufferShape.insert(bufferShape.begin(), AREF_SIZE);
+  return MemDescType::get(bufferShape, memDescType.getElementType(),
+                          memDescType.getEncoding(),
+                          memDescType.getMemorySpace(), true);
+}
+
+void assignDepth(ModuleOp mod, int numStages) {
+  SmallVector<ArefCreateOp> arefOps;
+  mod.walk([&](ArefCreateOp arefOp) { arefOps.push_back(arefOp); });
+
+  auto getParentBlock = [](ArefPutEnterOp op) -> Block* {
+    auto block = op->getBlock();
+    while (block && block->getParentOp() &&
+           !isa<WarpGroupOp>(block->getParentOp()))
+      block = block->getParentOp()->getBlock();
+    assert(block);
+    assert(block->getParentOp());
+    return block;
+  };
+
+  SmallVector<Operation *> allocsToErase;
+  for (auto arefOp : arefOps) {
+    DenseSet<Block*> producerPartitions;
+    bool usedInLoop = true;
+    for (auto user : arefOp->getUsers()) {
+      usedInLoop = usedInLoop && user->getParentOfType<scf::ForOp>();
+      // verify that aref is used in the loop
+      if (auto putEnterOp = dyn_cast<ArefPutEnterOp>(user))
+        producerPartitions.insert(getParentBlock(putEnterOp));
+    }
+    // if not used in loop or used in multiple wgOps, do not update aref depth,
+    // do not update aref depth
+    if (!usedInLoop || producerPartitions.size() != 1)
+      continue;
+
+    // TODO: For now only load buffering is handled
+    auto depth = numStages;
+
+    SmallVector<Value> allocOps;
+    SmallVector<Type> arefTypes;
+
+    OpBuilder builder(arefOp);
+    for (auto opnd : arefOp.getOperands()) {
+      auto arefBufType = cast<MemDescType>(opnd.getType());
+      arefBufType = getArefbufMemDescType(
+          getDataMemDescType(arefBufType, true), depth);
+      auto oldAlloc = opnd.getDefiningOp();
+      auto loc = oldAlloc->getLoc();
+      Operation *newAlloc = createAlloc(builder, loc, arefBufType, Value());
+      newAlloc->setAttr("aref_buffer", builder.getUnitAttr());
+      allocOps.push_back(newAlloc->getResult(0));
+      arefTypes.push_back(arefBufType);
+      allocsToErase.push_back(oldAlloc);
+    }
+    auto arefTy = ArefType::get(
+        builder.getContext(),
+        TypeArrayAttr::get(builder.getContext(), arefTypes));
+    auto newAref = builder.create<ArefCreateOp>(
+        arefOp.getLoc(), arefTy, allocOps);
+    arefOp.getResult().replaceAllUsesWith(newAref.getResult());
+    arefOp.erase();
+  }
+
+  for (auto alloc : allocsToErase) {
+    alloc->erase();
+  }
+}
+
 } // anonymous namespace
 
 class NVWSLowerAref : public impl::NVWSLowerArefBase<NVWSLowerAref> {
@@ -711,6 +801,8 @@ public:
         signalPassFailure();
     }
     LLVM_DEBUG(llvm::dbgs() << "After arefIndexAssignment\n" << m << "\n");
+
+    assignDepth(m, numStages);
 
     mlir::RewritePatternSet patterns(context);
     patterns.add<LowerArefCreate>(context);
