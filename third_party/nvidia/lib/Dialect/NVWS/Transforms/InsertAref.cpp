@@ -83,7 +83,10 @@ SmallVector<ProducedValueInfo> getProducedValues(Operation *op,
     return producedValues;
   }
   for (auto result : op->getResults()) {
-    producedValues.push_back({partition, result});
+    // avoid the 1st MMA in attention
+    if (!isa<AsyncTokenType>(result.getType())) {
+      producedValues.push_back({partition, result});
+    }
   }
   return producedValues;
 };

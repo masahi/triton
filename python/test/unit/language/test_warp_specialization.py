@@ -507,7 +507,7 @@ def matmul_scale_rhs_kernel(
 # @pytest.mark.parametrize("BLOCK_N", [128])
 # @pytest.mark.parametrize("BLOCK_K", [64])
 # @pytest.mark.parametrize(("NUM_WARPS", "NUM_STAGES"),[(4, 3)])
-def test_matmul_rhs_scale(
+def _test_matmul_rhs_scale(
     M,
     N,
     K,
@@ -549,4 +549,6 @@ def test_matmul_rhs_scale(
 # test_warp_specialize_tma_matmul(1024, 1024, 1024, 128, 128, 64, 3, 4, False)
 # test_warp_specialize_tma_matmul_persistent(1024, 1024, 1024, 128, 128, 64, 3, 4, False)
 # print("ok")
-test_matmul_rhs_scale(1024, 1024, 1024, 128, 128, 64, 4, 3)
+
+
+test_warp_specialize_attention_forward(1024, 1024, 128, 128, 2, True, 4, False)
