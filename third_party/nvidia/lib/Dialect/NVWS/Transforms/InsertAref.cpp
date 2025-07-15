@@ -24,6 +24,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "mlir/IR/ImplicitLocOpBuilder.h"
 
 #define GEN_PASS_CLASSES
 #include "nvidia/include/Dialect/NVWS/Transforms/Passes.h.inc"
@@ -38,6 +39,53 @@ using namespace mlir;
 using namespace triton::gpu;
 using namespace triton::nvidia_gpu;
 using namespace triton::nvws;
+
+using StageCluster = std::optional<std::pair<int, int>>;
+
+// TODO: dedup with TritonGPU
+struct PartitionBuilder : public ImplicitLocOpBuilder {
+  using ImplicitLocOpBuilder::ImplicitLocOpBuilder;
+
+  Value intCst(int value, unsigned width = 32) {
+    return create<arith::ConstantIntOp>(value, width);
+  }
+  Value boolCst(bool value) {
+    return intCst(value, /*width=*/1);
+  }
+
+  void assignStage(Operation *op, StageCluster stageCluster);
+  void assignPartition(Operation *op, Partition &partition);
+
+  template <typename OpT, typename... Args>
+  auto createInto(Partition &partition, StageCluster stageCluster,
+                  Args &&...args) {
+    auto op = create<OpT>(std::forward<Args>(args)...);
+    assignPartition(op, partition);
+    assignStage(op, stageCluster);
+    return op;
+  }
+};
+
+void PartitionBuilder::assignStage(Operation *op, StageCluster stageCluster) {
+  if (stageCluster) {
+    op->setAttr(triton::kLoopStageAttrName, getI32IntegerAttr(stageCluster->first));
+    op->setAttr(triton::kLoopClusterAttrName, getI32IntegerAttr(stageCluster->second));
+  }
+}
+
+void PartitionBuilder::assignPartition(Operation *op, Partition &partition) {
+  op->setAttr(kPartitionAttrName, getI32IntegerAttr(partition.getIndex()));
+}
+
+// Get the stage and cluster for an operation, if it has one assigned.
+StageCluster getStageCluster(Operation *op) {
+  auto stageAttr = op->getAttrOfType<IntegerAttr>(triton::kLoopStageAttrName);
+  auto clusterAttr = op->getAttrOfType<IntegerAttr>(triton::kLoopClusterAttrName);
+  if (!stageAttr || !clusterAttr)
+    return std::nullopt;
+  return std::make_pair(stageAttr.getInt(), clusterAttr.getInt());
+}
+
 
 struct ProducedValueInfo {
   Partition *partition;
@@ -257,18 +305,6 @@ SmallVector<Operation *> createArefPut(OpBuilder &builder, ArefCreateOp aref,
     staleOps.push_back(descOp);
   } else if (isGlobalLoadAndAlloc(result)) {
     llvm_unreachable("cpasync not supported yet");
-  } else if (auto tensorType = dyn_cast<RankedTensorType>(result.getType())) {
-    auto op = result.getDefiningOp();
-    if (op && isa<triton::DescriptorOpInterface>(op)) {
-      createNVWSDescriptorLoadOp(builder, op, dataBuf, producerPartition, schedule, loc);
-      producerKind = AsyncOp::TMALoad;
-      staleOps.push_back(op);
-    } else if (op && isa<triton::LoadOp>(op)) {
-      llvm_unreachable("cpasync not supported yet");
-    } else {
-      auto storeOp = builder.create<LocalStoreOp>(loc, result, dataBuf);
-      schedule.insert(producerPartition, storeOp);
-    }
   } else {
     llvm_unreachable("unsupported type");
   }
@@ -401,12 +437,6 @@ void createArefGet(OpBuilder &builder, ArefCreateOp aref, std::string arefTag,
     if (auto mmav5 = dyn_cast<MMAv5OpInterface>(consumers.front())) {
       mmav5.setIsAsync(true);
     }
-  } else if (auto tensorType = dyn_cast<RankedTensorType>(result.getType())) {
-    auto localLoadOp =
-        builder.create<LocalLoadOp>(loc, tensorType, dataBuf);
-    newOperand = localLoadOp.getResult();
-    schedule.insert(consumerPartition, localLoadOp);
-    createExit(AsyncOp::NONE);
   } else {
     llvm_unreachable("unsupported type");
   }
@@ -801,7 +831,7 @@ public:
         continue;
 
       runArefInsertionOnLoop(loop, *schedule);
-      combineArefs(loop, *schedule);
+      // combineArefs(loop, *schedule);
 
       schedule->serialize(loop);
     }
