@@ -387,6 +387,22 @@ LogicalResult rewritePutEnterOp(ArefCreateOp arefOp, ArefPutEnterOp op,
   return success();
 }
 
+static MemDescType getAsMutable(MemDescType type) {
+  return MemDescType::get(type.getShape(), type.getElementType(),
+                          type.getEncoding(), type.getMemorySpace(),
+                          /*mutableMemory=*/true);
+}
+
+static void propagateMutability(Value value) {
+  for (Operation *user : value.getUsers()) {
+    if (user->hasTrait<OpTrait::MemDescViewTrait>()) {
+      user->getResult(0).setType(
+          getAsMutable(cast<MemDescType>(user->getResult(0).getType())));
+      propagateMutability(user->getResult(0));
+    }
+  }
+}
+
 LogicalResult rewriteGetEnterOp(ArefCreateOp arefOp, ArefGetEnterOp op,
                                 PatternRewriter &rewriter, ArefValue arefVal) {
   auto loc = op.getLoc();
@@ -400,8 +416,10 @@ LogicalResult rewriteGetEnterOp(ArefCreateOp arefOp, ArefGetEnterOp op,
   auto views = getSubViews(arefVal, stage, loc, rewriter);
   assert(views.size() == op.getResults().size());
 
-  for (int i = 0; i < arefVal.buffers.size(); ++i)
+  for (int i = 0; i < arefVal.buffers.size(); ++i) {
     op.getResult(i).replaceAllUsesWith(views[i]);
+    propagateMutability(views[i]);
+  }
 
   return success();
 }
