@@ -259,17 +259,6 @@ struct ArriveBarrierOpConversion
   }
 };
 
-// TODO: Refactor with other code paths
-void createTcgen05Commit(ConversionPatternRewriter &rewriter, Location loc,
-                         Value barrier, Value pred) {
-  PTXBuilder ptxBuilder;
-  auto *barrierOperand = ptxBuilder.newAddrOperand(barrier, "r");
-  std::string opcode = "tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64";
-  auto &barrierOp = *ptxBuilder.create<PTXInstr>(opcode);
-  barrierOp(barrierOperand).predicate(pred);
-  ptxBuilder.launch(rewriter, loc, void_ty(rewriter.getContext()));
-}
-
 struct ArefCompleteOpConversion
     : public ConvertOpToLLVMPattern<triton::nvws::ArefCompleteOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -312,7 +301,7 @@ struct ArefCompleteOpConversion
       } else {
         pred = t0Pred;
       }
-      createTcgen05Commit(rewriter, loc, smemObj.getBase(), pred);
+      LLVM::NVIDIA::createTcgen05Commit(rewriter, loc, smemObj.getBase(), pred);
     } else if (trackedOp == nvws::AsyncOp::CpAsync) {
       llvm_unreachable("cpasync support NYI");
     } else if (trackedOp == nvws::AsyncOp::NONE) {
