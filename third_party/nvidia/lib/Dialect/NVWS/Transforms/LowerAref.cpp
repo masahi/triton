@@ -250,18 +250,38 @@ SmallVector<Value> getSubViews(ArefValue arefVal, Value stage, Location loc,
   return views;
 }
 
-void lowerAsyncLoads(ArefPutEnterOp op, PatternRewriter &rewriter,
+void createTMALoad(triton::nvws::DescriptorLoadOp op, OpBuilder &rewriter,
+                   Value barrierAlloc, Value pred) {
+  auto indices = translateTMAIndices(
+      rewriter, op.getLoc(),
+      op.getDesc().getType().getBlockType().getEncoding(), op.getIndices());
+  rewriter.create<triton::nvidia_gpu::AsyncTMACopyGlobalToLocalOp>(
+      op.getLoc(), op.getDesc(), indices, barrierAlloc, op.getResult(), pred);
+};
+
+void createTMAGather(triton::nvws::DescriptorGatherOp op, OpBuilder &rewriter,
+                     Value barrierAlloc, Value pred) {
+  rewriter.create<triton::nvidia_gpu::AsyncTMAGatherOp>(
+      op.getLoc(), op.getDesc(), op.getXOffsets(), op.getYOffset(),
+      barrierAlloc, op.getResult(), pred);
+}
+
+void lowerTMALoad(ArefPutEnterOp op, PatternRewriter &rewriter,
                      ArefValue arefVal) {
   auto loc = op.getLoc();
   // for now handle TMA loads in PutEnterOp
   SmallVector<Operation *> loadOps;
-  for (auto result : op.getResults())
+  int txCount = 0;
+  for (auto result : op.getResults()) {
     for (auto user : result.getUsers()) {
-      // Temporary workaround for lit testing: handle TMA loads here until a
-      // dedicated tma_load op is added to the NVWS dialect
-      if (user->getName().getStringRef() == "tma_load")
-        loadOps.push_back(user);
+      if (auto loadOp =
+              dyn_cast<triton::nvws::DescriptorLoadOpInterface>(user)) {
+        loadOps.push_back(loadOp);
+        txCount += loadOp.getTxCount();
+      }
     }
+  }
+
   assert(loadOps.size() <= op.getResults().size());
   if (loadOps.empty())
     return;
@@ -292,9 +312,23 @@ void lowerAsyncLoads(ArefPutEnterOp op, PatternRewriter &rewriter,
   Value fullBarrier =
       getFullBarrier(rewriter, loc, arefVal, arefPutExitOp.getIndex());
   Value pred = rewriter.create<arith::ConstantIntOp>(loc, 1, 1);
-  rewriter.create<triton::nvidia_gpu::BarrierExpectOp>(loc, fullBarrier, 0,
+  rewriter.create<triton::nvidia_gpu::BarrierExpectOp>(loc, fullBarrier, txCount,
                                                        pred);
-  return;
+
+  OpBuilder::InsertionGuard g(rewriter);
+  rewriter.setInsertionPoint(arefPutExitOp);
+  for (auto loadOp : loadOps) {
+    Value pred = rewriter.create<arith::ConstantIntOp>(loc, 1, 1);
+    if (auto descLoad = dyn_cast<triton::nvws::DescriptorLoadOp>(loadOp)) {
+      createTMALoad(descLoad, rewriter, fullBarrier, pred);
+    } else if (auto descGather =
+                   dyn_cast<triton::nvws::DescriptorGatherOp>(loadOp)) {
+      createTMAGather(descGather, rewriter, fullBarrier, pred);
+    } else {
+      llvm_unreachable("Unknown load op");
+    }
+    loadOp->erase();
+  }
 }
 
 void waitOnBarrier(PatternRewriter &rewriter, Location loc, Value mbar,
@@ -344,7 +378,7 @@ LogicalResult rewritePutEnterOp(ArefCreateOp arefOp, ArefPutEnterOp op,
 
   // TMA load need special handling as it requires fullMbarrier that
   // we need to get from matching ArefPutExitOp
-  lowerAsyncLoads(op, rewriter, arefVal);
+  lowerTMALoad(op, rewriter, arefVal);
 
   // replaces uses with views
   for (int i = 0; i < arefVal.buffers.size(); ++i)
