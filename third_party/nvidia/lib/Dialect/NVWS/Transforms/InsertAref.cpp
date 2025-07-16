@@ -17,6 +17,7 @@
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Partition.h"
+#include "triton/Dialect/TritonGPU/Transforms/PartitionBuilder.h"
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
@@ -39,53 +40,6 @@ using namespace mlir;
 using namespace triton::gpu;
 using namespace triton::nvidia_gpu;
 using namespace triton::nvws;
-
-using StageCluster = std::optional<std::pair<int, int>>;
-
-// TODO: dedup with TritonGPU
-struct PartitionBuilder : public ImplicitLocOpBuilder {
-  using ImplicitLocOpBuilder::ImplicitLocOpBuilder;
-
-  Value intCst(int value, unsigned width = 32) {
-    return create<arith::ConstantIntOp>(value, width);
-  }
-  Value boolCst(bool value) {
-    return intCst(value, /*width=*/1);
-  }
-
-  void assignStage(Operation *op, StageCluster stageCluster);
-  void assignPartition(Operation *op, Partition &partition);
-
-  template <typename OpT, typename... Args>
-  auto createInto(Partition &partition, StageCluster stageCluster,
-                  Args &&...args) {
-    auto op = create<OpT>(std::forward<Args>(args)...);
-    assignPartition(op, partition);
-    assignStage(op, stageCluster);
-    return op;
-  }
-};
-
-void PartitionBuilder::assignStage(Operation *op, StageCluster stageCluster) {
-  if (stageCluster) {
-    op->setAttr(triton::kLoopStageAttrName, getI32IntegerAttr(stageCluster->first));
-    op->setAttr(triton::kLoopClusterAttrName, getI32IntegerAttr(stageCluster->second));
-  }
-}
-
-void PartitionBuilder::assignPartition(Operation *op, Partition &partition) {
-  op->setAttr(kPartitionAttrName, getI32IntegerAttr(partition.getIndex()));
-}
-
-// Get the stage and cluster for an operation, if it has one assigned.
-StageCluster getStageCluster(Operation *op) {
-  auto stageAttr = op->getAttrOfType<IntegerAttr>(triton::kLoopStageAttrName);
-  auto clusterAttr = op->getAttrOfType<IntegerAttr>(triton::kLoopClusterAttrName);
-  if (!stageAttr || !clusterAttr)
-    return std::nullopt;
-  return std::make_pair(stageAttr.getInt(), clusterAttr.getInt());
-}
-
 
 struct ProducedValueInfo {
   Partition *partition;
