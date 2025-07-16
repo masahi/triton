@@ -217,6 +217,7 @@ SmallVector<Operation *> createArefPut(PartitionBuilder &builder,
       *producerPartition, stageCluster, buffers, aref,
       mkConstant(builder, loc, 0, 32, producerPartition, schedule));
   schedule.insert(producerPartition, putEnterOp);
+  // TODO: is this necessary
   putEnterOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
   auto dataBuf = putEnterOp.getResults()[0];
 
@@ -295,6 +296,7 @@ SetVector<Operation *> getTransitiveConsumers(Operation *op) {
 
 AsyncOp getConsumerKind(const SetVector<Operation *> &consumers) {
   assert(!consumers.empty());
+  // Why .front() is ok?
   auto consumer = consumers.front();
   if (isa<WarpGroupDotOp>(consumer)) {
     return AsyncOp::WGMMA;
@@ -446,21 +448,19 @@ bool insertArefs(PartitionBuilder &builder, scf::ForOp loop,
 }
 
 void runArefInsertionOnLoop(scf::ForOp loop, WarpSchedule &schedule) {
-  SmallVector<Operation *> opsToArefy;
+  SmallVector<Operation *> ops;
   loop.walk([&](Operation *op) {
     if (isa<ArefCreateOp, TMEMAllocOp, ArefPutEnterOp, ArefGetEnterOp,
             TMEMLoadOp, TMEMStoreOp, ArefPutExitOp, ArefGetExitOp, scf::YieldOp,
             triton::FuncOp, triton::ReturnOp, scf::ForOp, scf::IfOp>(op))
       return;
 
-    opsToArefy.push_back(op);
+    ops.push_back(op);
   });
 
   int arefTag = 0;
-  auto body = loop.getBody();
 
-  for (auto op : opsToArefy) {
-    // otherwise we need to place put/get
+  for (auto op : ops) {
     auto producedValues = getProducedValues(op, loop.getBody(), schedule);
     for (auto producedValue : producedValues) {
       PartitionBuilder builder(op->getLoc(), op);
@@ -532,43 +532,6 @@ ExitOp createCombinedArefOps(SmallVector<EnterOp> &enterOps,
 }
 
 void combineArefs(scf::ForOp loop, WarpSchedule &schedule) {
-  // this subpass will combine arefs into a single one if aref are
-  // used by the same op in the same block:
-
-  // %buf_a = alloc(); %aref_a = aref_create %buf_a
-  // %buf_b = alloc(); %aref_b = aref_create %buf_b
-
-  // %a = aref_get.enter %aref_a
-  // %b = aref_get.enter %aref_b
-  //   .. = op .. %a, .. , %b ..
-  // aref_get.exit %aref_a
-  // aref_get.exit %aref_B
-
-  // %a = aref_put.neter %aref_a
-  //  store .. %a
-  // aref_put.exit %aref_a
-  // %b = aref_put.neter %aref_b
-  //  store .. %b
-  // aref_put.exit %aref_b
-
-  // becomes
-
-  // %buf_a = alloc(); %buf_b = alloc(); %aref_ab = aref_create %buf_a,
-  // %buf_b
-
-  // %a = aref_get.enter %aref_ab
-  // %b = aref_get.enter %aref_ab
-  //   .. = op .. %a, .. , %b ..
-  // aref_get.exit %aref_ab
-
-  // %a,5b = aref_put.enter %aref_ab
-  //  store .. %a
-  //  store .. %b
-  // aref_put.exit %aref_ab
-
-  // for now this happens at MMA sites, so we just visit MMA ops, generic
-  // algorithm can be implemented at a later time
-
   std::function<ArefCreateOp(Value)> findAref =
       [&](Value opnd) -> ArefCreateOp {
     if (!opnd)
