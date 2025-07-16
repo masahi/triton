@@ -274,6 +274,16 @@ Value mkConstant(PartitionBuilder &builder, StageCluster stageCluster, int value
   return constValue;
 }
 
+StageCluster getStageClusterForProducer(Value producedValue) {
+  if (isDescLoadAndAlloc(producedValue) ||
+      isGlobalLoadAndAlloc(producedValue)) {
+    auto alloc = producedValue.getDefiningOp<LocalAllocOp>();
+    auto loadOp = alloc.getSrc().getDefiningOp();
+    return getStageCluster(loadOp);
+  }
+  return getStageCluster(producedValue.getDefiningOp());
+}
+
 SmallVector<Operation *> createArefPut(PartitionBuilder &builder, ArefCreateOp aref,
                                        std::string arefTag,
                                        ProducedValueInfo producedValue,
@@ -283,7 +293,7 @@ SmallVector<Operation *> createArefPut(PartitionBuilder &builder, ArefCreateOp a
   auto arefBufType = cast<MemDescType>(aref.getOperand(0).getType());
   Value result = producedValue.result;
   auto dataBufType = getDataMemDescType(arefBufType, true);
-  StageCluster stageCluster = getStageCluster(result.getDefiningOp());
+  StageCluster stageCluster = getStageClusterForProducer(result);
 
   SmallVector<Type> buffers{dataBufType};
 
