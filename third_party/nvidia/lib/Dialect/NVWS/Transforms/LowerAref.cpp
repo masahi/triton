@@ -37,6 +37,7 @@
 #include "nvidia/include/Dialect/NVWS/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/PartitionBuilder.h"
+#include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/Transforms/TMAUtilities.h"
@@ -59,6 +60,16 @@ namespace triton {
 namespace {
 
 // ----------------------------------------------------------------------------
+
+void assignStageCluster(Operation *op, StageCluster stageCluster,
+                        OpBuilder &builder) {
+  if (stageCluster) {
+    op->setAttr(triton::kLoopStageAttrName,
+                builder.getI32IntegerAttr(stageCluster->first));
+    op->setAttr(triton::kLoopClusterAttrName,
+                builder.getI32IntegerAttr(stageCluster->second));
+  }
+}
 
 struct ArefValue {
   Value emptyMbars;
@@ -255,19 +266,23 @@ void createTMALoad(triton::nvws::DescriptorLoadOp op, OpBuilder &rewriter,
   auto indices = translateTMAIndices(
       rewriter, op.getLoc(),
       op.getDesc().getType().getBlockType().getEncoding(), op.getIndices());
-  rewriter.create<triton::nvidia_gpu::AsyncTMACopyGlobalToLocalOp>(
-      op.getLoc(), op.getDesc(), indices, barrierAlloc, op.getResult(), pred);
+  auto newLoadOp =
+      rewriter.create<triton::nvidia_gpu::AsyncTMACopyGlobalToLocalOp>(
+          op.getLoc(), op.getDesc(), indices, barrierAlloc, op.getResult(),
+          pred);
+  assignStageCluster(newLoadOp, getStageCluster(op), rewriter);
 };
 
 void createTMAGather(triton::nvws::DescriptorGatherOp op, OpBuilder &rewriter,
                      Value barrierAlloc, Value pred) {
-  rewriter.create<triton::nvidia_gpu::AsyncTMAGatherOp>(
+  auto newGatherOp = rewriter.create<triton::nvidia_gpu::AsyncTMAGatherOp>(
       op.getLoc(), op.getDesc(), op.getXOffsets(), op.getYOffset(),
       barrierAlloc, op.getResult(), pred);
+  assignStageCluster(newGatherOp, getStageCluster(op), rewriter);
 }
 
 void lowerTMALoad(ArefPutEnterOp op, PatternRewriter &rewriter,
-                     ArefValue arefVal) {
+                  ArefValue arefVal) {
   auto loc = op.getLoc();
   // for now handle TMA loads in PutEnterOp
   SmallVector<Operation *> loadOps;
@@ -312,8 +327,9 @@ void lowerTMALoad(ArefPutEnterOp op, PatternRewriter &rewriter,
   Value fullBarrier =
       getFullBarrier(rewriter, loc, arefVal, arefPutExitOp.getIndex());
   Value pred = rewriter.create<arith::ConstantIntOp>(loc, 1, 1);
-  rewriter.create<triton::nvidia_gpu::BarrierExpectOp>(loc, fullBarrier, txCount,
-                                                       pred);
+  auto expectOp = rewriter.create<triton::nvidia_gpu::BarrierExpectOp>(
+      loc, fullBarrier, txCount, pred);
+  assignStageCluster(expectOp, getStageCluster(op), rewriter);
 
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPoint(arefPutExitOp);
@@ -333,7 +349,7 @@ void lowerTMALoad(ArefPutEnterOp op, PatternRewriter &rewriter,
 
 void waitOnBarrier(PatternRewriter &rewriter, Location loc, Value mbar,
                    Value index, int depth, bool isPut, bool firstGet,
-                   std::string attrName) {
+                   StageCluster stageCluster, std::string attrName) {
   Operation *phase = rewriter.create<arith::DivSIOp>(
       loc, index, rewriter.create<arith::ConstantIntOp>(loc, depth, 32));
   phase->setAttr(attrName, rewriter.getUnitAttr());
@@ -349,7 +365,8 @@ void waitOnBarrier(PatternRewriter &rewriter, Location loc, Value mbar,
         rewriter.create<arith::ConstantIntOp>(loc, 1, 32));
   }
   phase->setAttr(attrName, rewriter.getUnitAttr());
-  rewriter.create<WaitBarrierOp>(loc, mbar, phase->getResult(0));
+  auto waitOp = rewriter.create<WaitBarrierOp>(loc, mbar, phase->getResult(0));
+  assignStageCluster(waitOp, stageCluster, rewriter);
 }
 
 Value getStage(PatternRewriter &rewriter, Location loc, Value index, int depth,
@@ -370,7 +387,7 @@ LogicalResult rewritePutEnterOp(ArefCreateOp arefOp, ArefPutEnterOp op,
   Value emptyBarrier = getEmptyBarrier(rewriter, loc, arefVal, op.getIndex());
 
   waitOnBarrier(rewriter, loc, emptyBarrier, op.getIndex(), arefVal.depth, true,
-                arefOp->hasAttr("first_get"), "put_phase");
+                arefOp->hasAttr("first_get"), getStageCluster(op), "put_phase");
   Value stage =
       getStage(rewriter, loc, op.getIndex(), arefVal.depth, "put_stage");
   auto views = getSubViews(arefVal, stage, loc, rewriter);
@@ -410,7 +427,7 @@ LogicalResult rewriteGetEnterOp(ArefCreateOp arefOp, ArefGetEnterOp op,
 
   Value fullBarrier = getFullBarrier(rewriter, loc, arefVal, op.getIndex());
   waitOnBarrier(rewriter, loc, fullBarrier, op.getIndex(), arefVal.depth, false,
-                arefOp->hasAttr("first_get"), "get_phase");
+                arefOp->hasAttr("first_get"), getStageCluster(op), "get_phase");
   Value stage =
       getStage(rewriter, loc, op.getIndex(), arefVal.depth, "get_stage");
   auto views = getSubViews(arefVal, stage, loc, rewriter);
@@ -425,11 +442,13 @@ LogicalResult rewriteGetEnterOp(ArefCreateOp arefOp, ArefGetEnterOp op,
 }
 
 LogicalResult insertArriveBarrier(Location loc, ArrayAttr asyncOps,
-                                  PatternRewriter &rewriter, Value mbar) {
+                                  PatternRewriter &rewriter, Value mbar,
+                                  StageCluster stageCluster) {
 
   for (auto asyncOp : asyncOps) {
     auto asyncOpEnum = cast<AsyncOpAttr>(asyncOp).getValue();
-    rewriter.create<nvws::ArriveBarrierOp>(loc, mbar, asyncOpEnum);
+    auto op = rewriter.create<nvws::ArriveBarrierOp>(loc, mbar, asyncOpEnum);
+    assignStageCluster(op, stageCluster, rewriter);
   }
 
   return success();
@@ -440,7 +459,8 @@ LogicalResult rewritePutExitOp(ArefPutExitOp op, PatternRewriter &rewriter,
   auto loc = op->getLoc();
   rewriter.setInsertionPointAfter(op);
   Value fullBarrier = getFullBarrier(rewriter, loc, arefVal, op.getIndex());
-  return insertArriveBarrier(loc, op.getAsyncOps(), rewriter, fullBarrier);
+  return insertArriveBarrier(loc, op.getAsyncOps(), rewriter, fullBarrier,
+                             getStageCluster(op));
 }
 
 LogicalResult rewriteGetExitOp(ArefGetExitOp op, PatternRewriter &rewriter,
@@ -448,7 +468,8 @@ LogicalResult rewriteGetExitOp(ArefGetExitOp op, PatternRewriter &rewriter,
   auto loc = op->getLoc();
   rewriter.setInsertionPointAfter(op);
   Value emptyBarrier = getEmptyBarrier(rewriter, loc, arefVal, op.getIndex());
-  return insertArriveBarrier(loc, op.getAsyncOps(), rewriter, emptyBarrier);
+  return insertArriveBarrier(loc, op.getAsyncOps(), rewriter, emptyBarrier,
+                             getStageCluster(op));
 }
 
 class LowerArefCreate : public OpRewritePattern<ArefCreateOp> {
