@@ -260,25 +260,6 @@ SmallVector<Operation *> createArefPut(PartitionBuilder &builder,
   return staleOps;
 };
 
-enum class BlockScope {
-  UNSUPPORTED,
-  SAME_BLOCK,
-  NESTED_INSIDE,
-};
-
-BlockScope getBlockScope(Block *from, Block *to) {
-  if (from == to)
-    return BlockScope::SAME_BLOCK;
-
-  auto block = to;
-  while (block && block != from)
-    block = block->getParentOp()->getBlock();
-  if (block == from)
-    return BlockScope::NESTED_INSIDE;
-
-  return BlockScope::UNSUPPORTED;
-}
-
 SetVector<Operation *> getTransitiveConsumers(Operation *op) {
   SetVector<Operation *> opConsumers;
   for (auto user : op->getUsers()) {
@@ -294,55 +275,23 @@ SetVector<Operation *> getTransitiveConsumers(Operation *op) {
   return opConsumers;
 }
 
-AsyncOp getConsumerKind(const SetVector<Operation *> &consumers) {
-  assert(!consumers.empty());
-  // Why .front() is ok?
-  auto consumer = consumers.front();
-  if (isa<WarpGroupDotOp>(consumer)) {
-    return AsyncOp::WGMMA;
-  } else if (auto mmav5 = dyn_cast<MMAv5OpInterface>(consumer)) {
-    return AsyncOp::TC5MMA;
-  }
-  return AsyncOp::NONE;
-}
-
-Operation *getExitInsertPoint(Block *producerBlock,
-                              const SetVector<Operation *> &consumers) {
-  DenseMap<Operation *, int> opOrdering;
-  producerBlock->walk(
-      [&](Operation *op) { opOrdering[op] = opOrdering.size(); });
-
-  SetVector<Operation *> validConsumers;
+SetVector<AsyncOp> getConsumerKinds(const SetVector<Operation *> &consumers) {
+  SetVector<AsyncOp> ret;
   for (auto consumer : consumers) {
-    if (getBlockScope(producerBlock, consumer->getBlock()) !=
-        BlockScope::UNSUPPORTED)
-      validConsumers.insert(consumer);
+    if (isa<WarpGroupDotOp>(consumer)) {
+      ret.insert(AsyncOp::WGMMA);
+    } else if (auto mmav5 = dyn_cast<MMAv5OpInterface>(consumer)) {
+      ret.insert(AsyncOp::TC5MMA);
+    } else
+      ret.insert(AsyncOp::NONE);
   }
-  assert(!validConsumers.empty());
-
-  auto lastConsumer = *llvm::max_element(validConsumers, [&](auto a, auto b) {
-    return opOrdering.at(a) < opOrdering.at(b);
-  });
-
-  auto consumerScope = getBlockScope(producerBlock, lastConsumer->getBlock());
-  if (BlockScope::SAME_BLOCK == consumerScope) {
-    return lastConsumer;
-  } else if (BlockScope::NESTED_INSIDE == consumerScope) {
-    auto regionOp = lastConsumer->getParentOp();
-    while (regionOp->getBlock() != producerBlock) {
-      regionOp = regionOp->getParentOp();
-    }
-    return regionOp;
-  } else {
-    llvm_unreachable("unsupported consumer scope");
-  }
-  return nullptr;
+  return ret;
 }
 
 void createArefGet(PartitionBuilder &builder, ArefCreateOp aref,
                    std::string arefTag, ProducedValueInfo producedValue,
                    SetVector<Operation *> users, Partition *consumerPartition,
-                   WarpSchedule &schedule) {
+                   WarpSchedule &schedule, PostDominanceInfo &postDomInfo) {
   OpBuilder::InsertionGuard g(builder);
   auto loc = producedValue.result.getLoc();
   auto arefBufType = cast<MemDescType>(aref.getOperand(0).getType());
@@ -358,37 +307,38 @@ void createArefGet(PartitionBuilder &builder, ArefCreateOp aref,
   schedule.insert(consumerPartition, getEnterOp);
   getEnterOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
 
-  auto createExit = [&](AsyncOp consumerKind) {
-    SmallVector<Attribute> consumerAttr{
-        AsyncOpAttr::get(aref.getContext(), consumerKind)};
-    auto consumersAttr = builder.getArrayAttr(consumerAttr);
-    auto getExitOp = builder.createInto<ArefGetExitOp>(
-        *consumerPartition, stageCluster, aref,
-        mkConstant(builder, loc, 0, 32, consumerPartition, schedule),
-        consumersAttr);
-    getExitOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
-    schedule.insert(consumerPartition, getExitOp);
-  };
-
+  auto consumers = getTransitiveConsumers(result.getDefiningOp());
   Value newOperand;
   if (auto memDescType = dyn_cast<MemDescType>(result.getType())) {
     newOperand = dataBuf;
-    auto consumers = getTransitiveConsumers(result.getDefiningOp());
-    auto insertPoint =
-        getExitInsertPoint(result.getDefiningOp()->getBlock(), consumers);
+    auto insertPoint = *llvm::min_element(consumers, [&](auto &lhs, auto &rhs) {
+      return postDomInfo.postDominates(lhs, rhs);
+    });
     builder.setInsertionPointAfter(insertPoint);
-    auto kind = getConsumerKind(consumers);
-    createExit(kind);
-    if (auto mmav5 = dyn_cast<MMAv5OpInterface>(consumers.front())) {
-      mmav5.setIsAsync(true);
-    }
   } else if (auto tensorType = dyn_cast<RankedTensorType>(result.getType())) {
     auto localLoadOp = builder.create<LocalLoadOp>(loc, tensorType, dataBuf);
     newOperand = localLoadOp.getResult();
     schedule.insert(consumerPartition, localLoadOp);
-    createExit(AsyncOp::NONE);
   } else {
     llvm_unreachable("unsupported type");
+  }
+
+  SmallVector<Attribute> consumerAttr;
+  for (auto kind : getConsumerKinds(consumers)) {
+    consumerAttr.push_back(AsyncOpAttr::get(aref.getContext(), kind));
+  }
+  auto consumersAttr = builder.getArrayAttr(consumerAttr);
+  auto getExitOp = builder.createInto<ArefGetExitOp>(
+      *consumerPartition, stageCluster, aref,
+      mkConstant(builder, loc, 0, 32, consumerPartition, schedule),
+      consumersAttr);
+  getExitOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
+  schedule.insert(consumerPartition, getExitOp);
+
+  for (auto consumer : consumers) {
+    if (auto mmav5 = dyn_cast<MMAv5OpInterface>(consumer)) {
+      mmav5.setIsAsync(true);
+    }
   }
 
   // update result operand with newOperand
@@ -437,8 +387,10 @@ bool insertArefs(PartitionBuilder &builder, scf::ForOp loop,
   auto tag = std::string("aref_") + std::to_string(arefTag);
   auto staleOps = createArefPut(builder, aref, tag, producedValue,
                                 producerPartition, schedule);
+
+  PostDominanceInfo postDomInfo(loop);
   createArefGet(builder, aref, tag, producedValue, users, consumerPartition,
-                schedule);
+                schedule, postDomInfo);
 
   for (auto op : staleOps) {
     op->erase();
