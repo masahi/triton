@@ -271,7 +271,7 @@ void createTcgen05Commit(ConversionPatternRewriter &rewriter, Location loc,
 }
 
 struct NvwsArriveBarrierOpConversion
-    : public ConvertOpToLLVMPattern<triton::nvws::ArriveBarrierOp> {
+    : public ConvertOpToLLVMPattern<triton::nvws::ArefCompleteOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   void emitBarrier(std::string instr, LLVM::SharedMemoryObject smemObj,
@@ -286,7 +286,7 @@ struct NvwsArriveBarrierOpConversion
   }
 
   LogicalResult
-  matchAndRewrite(triton::nvws::ArriveBarrierOp op, OpAdaptor adaptor,
+  matchAndRewrite(triton::nvws::ArefCompleteOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(
         op.getLoc(), adaptor.getAlloc(),
