@@ -182,14 +182,11 @@ void createNVWSDescriptorLoadOp(OpBuilder &builder, Operation *ttDescLoadOp,
   }
 }
 
-Value mkConstant(PartitionBuilder &builder, StageCluster stageCluster,
-                 int value, int width, Partition *partition,
-                 WarpSchedule &schedule) {
+Value mkConstant(OpBuilder &builder, Location loc, int value, int width,
+                 Partition *partition, WarpSchedule &schedule) {
   assert(partition);
-  auto constValue = builder.createInto<arith::ConstantIntOp>(
-      *partition, stageCluster, value, width);
+  auto constValue = builder.create<arith::ConstantIntOp>(loc, value, width);
   schedule.insert(partition, constValue);
-
   return constValue;
 }
 
@@ -218,7 +215,7 @@ SmallVector<Operation *> createArefPut(PartitionBuilder &builder,
 
   auto putEnterOp = builder.createInto<ArefPutEnterOp>(
       *producerPartition, stageCluster, buffers, aref,
-      mkConstant(builder, stageCluster, 0, 32, producerPartition, schedule));
+      mkConstant(builder, loc, 0, 32, producerPartition, schedule));
   schedule.insert(producerPartition, putEnterOp);
   putEnterOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
   auto dataBuf = putEnterOp.getResults()[0];
@@ -254,7 +251,7 @@ SmallVector<Operation *> createArefPut(PartitionBuilder &builder,
 
   auto putExitOp = builder.createInto<ArefPutExitOp>(
       *producerPartition, stageCluster, aref,
-      mkConstant(builder, stageCluster, 0, 32, producerPartition, schedule),
+      mkConstant(builder, loc, 0, 32, producerPartition, schedule),
       builder.getArrayAttr(SmallVector<Attribute>{
           AsyncOpAttr::get(aref.getContext(), producerKind)}));
   putExitOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
@@ -354,7 +351,7 @@ void createArefGet(PartitionBuilder &builder, ArefCreateOp aref,
   SmallVector<Type> buffers{getDataMemDescType(arefBufType, false)};
   auto getEnterOp = builder.createInto<ArefGetEnterOp>(
       *consumerPartition, stageCluster, buffers, aref,
-      mkConstant(builder, stageCluster, 0, 32, consumerPartition, schedule));
+      mkConstant(builder, loc, 0, 32, consumerPartition, schedule));
   Value dataBuf = getEnterOp.getResults()[0];
   schedule.insert(consumerPartition, getEnterOp);
   getEnterOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
@@ -365,7 +362,7 @@ void createArefGet(PartitionBuilder &builder, ArefCreateOp aref,
     auto consumersAttr = builder.getArrayAttr(consumerAttr);
     auto getExitOp = builder.createInto<ArefGetExitOp>(
         *consumerPartition, stageCluster, aref,
-        mkConstant(builder, stageCluster, 0, 32, consumerPartition, schedule),
+        mkConstant(builder, loc, 0, 32, consumerPartition, schedule),
         consumersAttr);
     getExitOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
     schedule.insert(consumerPartition, getExitOp);
@@ -514,7 +511,8 @@ ExitOp createCombinedArefOps(SmallVector<EnterOp> &enterOps,
   }
   StageCluster stageCluster = getStageCluster(firstEnter);
   auto partition = schedule.getPartition(firstEnter);
-  auto zero = mkConstant(builder, stageCluster, 0, 32, partition, schedule);
+  auto zero =
+      mkConstant(builder, firstEnter.getLoc(), 0, 32, partition, schedule);
   auto enter = builder.createInto<EnterOp>(*partition, stageCluster,
                                            arefEnterBuffers, aref, zero);
   builder.setInsertionPoint(lastExit);
