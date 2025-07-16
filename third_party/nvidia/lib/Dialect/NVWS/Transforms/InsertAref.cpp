@@ -645,7 +645,10 @@ void combineArefs(scf::ForOp loop, WarpSchedule &schedule) {
     if (!opnd)
       return {};
     if (auto op = opnd.getDefiningOp()) {
-      if (auto enterOp = dyn_cast<ArefGetEnterOp>(op)) {
+      if (isa<WarpGroupDotOp, MMAv5OpInterface>(op)) {
+	// TODO, more proper check
+	return {};
+      } else if (auto enterOp = dyn_cast<ArefGetEnterOp>(op)) {
         return cast<ArefCreateOp>(enterOp.getAref().getDefiningOp());
       } else {
         for (auto operand : op->getOperands())
@@ -798,7 +801,7 @@ public:
         continue;
 
       runArefInsertionOnLoop(loop, *schedule);
-      // combineArefs(loop, *schedule);
+      combineArefs(loop, *schedule);
 
       schedule->serialize(loop);
     }

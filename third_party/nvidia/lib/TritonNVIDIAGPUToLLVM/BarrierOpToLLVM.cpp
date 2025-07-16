@@ -288,6 +288,7 @@ struct NvwsArriveBarrierOpConversion
   LogicalResult
   matchAndRewrite(triton::nvws::ArefCompleteOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    // TODO: predicate
     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(
         op.getLoc(), adaptor.getAlloc(),
         typeConverter->convertType(op.getAlloc().getType().getElementType()),
