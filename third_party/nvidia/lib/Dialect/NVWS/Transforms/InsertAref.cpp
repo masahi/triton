@@ -4,6 +4,7 @@
 #include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/IR/Location.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Value.h"
@@ -25,7 +26,6 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "mlir/IR/ImplicitLocOpBuilder.h"
 
 #define GEN_PASS_CLASSES
 #include "nvidia/include/Dialect/NVWS/Transforms/Passes.h.inc"
@@ -67,16 +67,6 @@ MemDescType getArefbufMemDescType(MemDescType memDescType, int32_t AREF_SIZE) {
                           memDescType.getMemorySpace(), true);
 }
 
-Partition *getPartition(Operation *op, WarpSchedule &schedule) {
-  while (op && !schedule.getPartition(op)) {
-    op = op->getParentOp();
-  }
-  if (op) {
-    return schedule.getPartition(op);
-  }
-  return nullptr;
-}
-
 bool isDescLoadAndAlloc(Value result) {
   auto alloc = result.getDefiningOp<LocalAllocOp>();
   if (!alloc)
@@ -92,10 +82,10 @@ bool isGlobalLoadAndAlloc(Value result) {
   return alloc.getSrc().getDefiningOp<triton::LoadOp>() != nullptr;
 }
 
-SmallVector<ProducedValueInfo> getProducedValues(Operation *op,
+SmallVector<ProducedValueInfo> getProducedValues(Operation *op, Block *loopBody,
                                                  WarpSchedule &schedule) {
   SmallVector<ProducedValueInfo> producedValues;
-  auto partition = getPartition(op, schedule);
+  auto partition = schedule.getPartition(loopBody->findAncestorOpInBlock(*op));
   if (partition == schedule.getRootPartition()) {
     return producedValues;
   }
@@ -220,8 +210,9 @@ MemDescType getDataMemDescType(MemDescType memDescType, bool mutableMemory) {
                           memDescType.getMemorySpace(), mutableMemory);
 };
 
-Value mkConstant(PartitionBuilder &builder, StageCluster stageCluster, int value, int width,
-                 Partition *partition, WarpSchedule &schedule) {
+Value mkConstant(PartitionBuilder &builder, StageCluster stageCluster,
+                 int value, int width, Partition *partition,
+                 WarpSchedule &schedule) {
   assert(partition);
   auto constValue = builder.createInto<arith::ConstantIntOp>(
       *partition, stageCluster, value, width);
@@ -240,8 +231,8 @@ StageCluster getStageClusterForProducer(Value producedValue) {
   return getStageCluster(producedValue.getDefiningOp());
 }
 
-SmallVector<Operation *> createArefPut(PartitionBuilder &builder, ArefCreateOp aref,
-                                       std::string arefTag,
+SmallVector<Operation *> createArefPut(PartitionBuilder &builder,
+                                       ArefCreateOp aref, std::string arefTag,
                                        ProducedValueInfo producedValue,
                                        Partition *producerPartition,
                                        WarpSchedule &schedule) {
@@ -275,7 +266,8 @@ SmallVector<Operation *> createArefPut(PartitionBuilder &builder, ArefCreateOp a
   } else if (auto tensorType = dyn_cast<RankedTensorType>(result.getType())) {
     auto op = result.getDefiningOp();
     if (op && isa<triton::DescriptorOpInterface>(op)) {
-      createNVWSDescriptorLoadOp(builder, op, dataBuf, producerPartition, schedule, loc);
+      createNVWSDescriptorLoadOp(builder, op, dataBuf, producerPartition,
+                                 schedule, loc);
       producerKind = AsyncOp::TMALoad;
       staleOps.push_back(op);
     } else if (op && isa<triton::LoadOp>(op)) {
@@ -376,8 +368,8 @@ Operation *getExitInsertPoint(Block *producerBlock,
   return nullptr;
 }
 
-void createArefGet(PartitionBuilder &builder, ArefCreateOp aref, std::string arefTag,
-                   ProducedValueInfo producedValue,
+void createArefGet(PartitionBuilder &builder, ArefCreateOp aref,
+                   std::string arefTag, ProducedValueInfo producedValue,
                    SetVector<Operation *> users, Partition *consumerPartition,
                    WarpSchedule &schedule) {
   OpBuilder::InsertionGuard g(builder);
@@ -389,7 +381,7 @@ void createArefGet(PartitionBuilder &builder, ArefCreateOp aref, std::string are
 
   SmallVector<Type> buffers{getDataMemDescType(arefBufType, false)};
   auto getEnterOp = builder.createInto<ArefGetEnterOp>(
-						       *consumerPartition, stageCluster, buffers, aref,
+      *consumerPartition, stageCluster, buffers, aref,
       mkConstant(builder, stageCluster, 0, 32, consumerPartition, schedule));
   Value dataBuf = getEnterOp.getResults()[0];
   schedule.insert(consumerPartition, getEnterOp);
@@ -400,7 +392,8 @@ void createArefGet(PartitionBuilder &builder, ArefCreateOp aref, std::string are
         AsyncOpAttr::get(aref.getContext(), consumerKind)};
     auto consumersAttr = builder.getArrayAttr(consumerAttr);
     auto getExitOp = builder.createInto<ArefGetExitOp>(
-        *consumerPartition, stageCluster, aref, mkConstant(builder, stageCluster, 0, 32, consumerPartition, schedule),
+        *consumerPartition, stageCluster, aref,
+        mkConstant(builder, stageCluster, 0, 32, consumerPartition, schedule),
         consumersAttr);
     getExitOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
     schedule.insert(consumerPartition, getExitOp);
@@ -419,8 +412,7 @@ void createArefGet(PartitionBuilder &builder, ArefCreateOp aref, std::string are
       mmav5.setIsAsync(true);
     }
   } else if (auto tensorType = dyn_cast<RankedTensorType>(result.getType())) {
-    auto localLoadOp =
-        builder.create<LocalLoadOp>(loc, tensorType, dataBuf);
+    auto localLoadOp = builder.create<LocalLoadOp>(loc, tensorType, dataBuf);
     newOperand = localLoadOp.getResult();
     schedule.insert(consumerPartition, localLoadOp);
     createExit(AsyncOp::NONE);
@@ -441,49 +433,25 @@ void createArefGet(PartitionBuilder &builder, ArefCreateOp aref, std::string are
   }
 };
 
-bool insertArefs(PartitionBuilder &builder, scf::ForOp loop, WarpSchedule &schedule,
-                 ProducedValueInfo producedValue, int arefTag) {
+bool insertArefs(PartitionBuilder &builder, scf::ForOp loop,
+                 WarpSchedule &schedule, ProducedValueInfo producedValue,
+                 int arefTag) {
   Partition *consumerPartition = nullptr;
   auto [producerPartition, result] = producedValue;
   assert(producerPartition);
   for (auto &useOpnd : result.getUses()) {
-    SmallVector<Partition *> userPartitions;
-    if (auto forOp = dyn_cast<scf::ForOp>(useOpnd.getOwner())) {
-      // TODO
-    } else if (auto yieldOp = dyn_cast<scf::YieldOp>(useOpnd.getOwner())) {
-      // TODO
-    } else {
-      userPartitions.push_back(schedule.getPartition((useOpnd.getOwner())));
-    }
-
-    for (auto partition : userPartitions) {
-      if (producerPartition != partition) {
-        consumerPartition = partition;
-	//        llvm::outs() << "consumer op\n";
-	//	useOpnd.getOwner()->dump();
-	// llvm::errs() << "producer partition " << producerPartition->getIndex() << "\n";
-	// llvm::errs() << "consumer partition " << consumerPartition->getIndex() << "\n";
-	break;
-      }
+    Partition *userPartition = schedule.getPartition((useOpnd.getOwner()));
+    if (producerPartition != userPartition) {
+      consumerPartition = userPartition;
+      break;
     }
   }
+
   if (!consumerPartition) {
     return false;
   }
   // we also enforce that there is at least one user of the result
   assert(llvm::count_if(result.getUsers(), [](auto) { return true; }) >= 1);
-
-  // if there are multitiple consumer groups, we need to generate as
-  // separate aref_get per consumer group
-
-  // if there are mutlilpe producer groups, we just pick first group to
-  // generate aref_put,
-
-  // if there are multiple producers, it is possible zip them in
-  // round-robin way, e.g.
-  //      (p1,p2,p3)x(c1,c2,c3,c4,c5,c6) -> (p1,c1) (p2,c2), (p3,c3),
-  //      (p1,c4), (p2,c5) (p3,c6) but it will require multilpe aref
-  //      buffers
 
   SetVector<Operation *> users(result.getUsers().begin(),
                                result.getUsers().end());
@@ -494,41 +462,6 @@ bool insertArefs(PartitionBuilder &builder, scf::ForOp loop, WarpSchedule &sched
     builder.setInsertionPoint(loop);
     aref = createAref(builder, producedValue);
   }
-
-  // for now we set put/get right after producing op, e.g.
-
-  //     %val = ..  @gr1
-  //       ..
-  //      .. = val  @gr2
-
-  //      %val = ..   @gr1
-  //      put %val    @gr2
-  //      %val = get  @gr2
-  //        ..
-  //      .. = val    @gr2
-  //
-  // However, in future we may want to consider where consumer is, e.g.
-
-  //   for  {
-  //     %val = ..  @gr1
-  //      if {
-  //           .. = %val @gr2
-  //         }
-  //    }
-
-  //  we may want to have put/get next to consumer, e.g.
-
-  //   for  {
-  //     %val = ..      @gr1
-  //      if {
-  //            put %val   @gr1
-  //            %val = get %gr2
-  //            .. = %val @gr2
-  //         }
-  //   }
-
-  // that can be important if we'd want to support epilogue decoupling
-  // in flattened loops.
 
   auto tag = std::string("aref_") + std::to_string(arefTag);
   auto staleOps = createArefPut(builder, aref, tag, producedValue,
@@ -548,7 +481,7 @@ void runArefInsertionOnLoop(scf::ForOp loop, WarpSchedule &schedule) {
   loop.walk([&](Operation *op) {
     if (isa<ArefCreateOp, TMEMAllocOp, ArefPutEnterOp, ArefGetEnterOp,
             TMEMLoadOp, TMEMStoreOp, ArefPutExitOp, ArefGetExitOp, scf::YieldOp,
-	triton::FuncOp, triton::ReturnOp, scf::ForOp, scf::IfOp>(op))
+            triton::FuncOp, triton::ReturnOp, scf::ForOp, scf::IfOp>(op))
       return;
 
     opsToArefy.push_back(op);
@@ -559,7 +492,7 @@ void runArefInsertionOnLoop(scf::ForOp loop, WarpSchedule &schedule) {
 
   for (auto op : opsToArefy) {
     // otherwise we need to place put/get
-    auto producedValues = getProducedValues(op, schedule);
+    auto producedValues = getProducedValues(op, loop.getBody(), schedule);
     for (auto producedValue : producedValues) {
       PartitionBuilder builder(op->getLoc(), op);
       builder.setInsertionPointAfter(op);
@@ -570,9 +503,10 @@ void runArefInsertionOnLoop(scf::ForOp loop, WarpSchedule &schedule) {
 }
 
 template <typename EnterOp, typename ExitOp>
-void createCombinedArefOps(SmallVector<EnterOp> &enterOps,
-                           SmallVector<ExitOp> &exitOps,
-                           ArefCreateOp aref, PartitionBuilder &builder, WarpSchedule& schedule) {
+ExitOp createCombinedArefOps(SmallVector<EnterOp> &enterOps,
+                             SmallVector<ExitOp> &exitOps, ArefCreateOp aref,
+                             PartitionBuilder &builder, WarpSchedule &schedule,
+                             Operation *enterInsertPoint = nullptr) {
   auto firstEnter = *llvm::min_element(enterOps, [](auto a, auto b) {
     assert(a->getBlock() == b->getBlock());
     return a->isBeforeInBlock(b);
@@ -600,18 +534,21 @@ void createCombinedArefOps(SmallVector<EnterOp> &enterOps,
   llvm::SmallVector<Attribute> producersOrConsumers(opAttrsSet.begin(),
                                                     opAttrsSet.end());
 
-  // TODO: Use dominance to properly place the combined get enter after the combined put exit
-  builder.setInsertionPoint(firstEnter);
+  if (enterInsertPoint) {
+    // Combine get enter need to be placed after combined put exit
+    builder.setInsertionPoint(enterInsertPoint);
+  } else {
+    builder.setInsertionPoint(firstEnter);
+  }
   StageCluster stageCluster = getStageCluster(firstEnter);
   auto partition = schedule.getPartition(firstEnter);
-  auto zero =
-    mkConstant(builder, stageCluster, 0, 32, partition, schedule);
-  auto enter = builder.createInto<EnterOp>(*partition, stageCluster, arefEnterBuffers,
-                                       aref, zero);
+  auto zero = mkConstant(builder, stageCluster, 0, 32, partition, schedule);
+  auto enter = builder.createInto<EnterOp>(*partition, stageCluster,
+                                           arefEnterBuffers, aref, zero);
   builder.setInsertionPoint(lastExit);
   auto exit =
       builder.createInto<ExitOp>(*partition, stageCluster, aref, zero,
-                             builder.getArrayAttr(producersOrConsumers));
+                                 builder.getArrayAttr(producersOrConsumers));
 
   for (auto [idx, enterOp] : llvm::enumerate(enterOps))
     enterOp.getResult(0).replaceAllUsesWith(enter.getResult(idx));
@@ -620,6 +557,8 @@ void createCombinedArefOps(SmallVector<EnterOp> &enterOps,
     op->setAttr("aref_tag", firstEnter->getAttr("aref_tag"));
     schedule.insert(partition, op);
   }
+
+  return lastExit;
 }
 
 void combineArefs(scf::ForOp loop, WarpSchedule &schedule) {
@@ -666,8 +605,8 @@ void combineArefs(scf::ForOp loop, WarpSchedule &schedule) {
       return {};
     if (auto op = opnd.getDefiningOp()) {
       if (isa<WarpGroupDotOp, MMAv5OpInterface>(op)) {
-	// TODO, more proper check
-	return {};
+        // TODO, more proper check
+        return {};
       } else if (auto enterOp = dyn_cast<ArefGetEnterOp>(op)) {
         return cast<ArefCreateOp>(enterOp.getAref().getDefiningOp());
       } else {
@@ -791,8 +730,10 @@ void combineArefs(scf::ForOp loop, WarpSchedule &schedule) {
                       TypeArrayAttr::get(builder.getContext(), arefBufTypes));
     auto aref =
         builder.create<ArefCreateOp>(lastAref->getLoc(), arefTy, arefBufs);
-    createCombinedArefOps(putEnterOps, putExitOps, aref, builder, schedule);
-    createCombinedArefOps(getEnterOps, getExitOps, aref, builder, schedule);
+    auto lastPutExit =
+        createCombinedArefOps(putEnterOps, putExitOps, aref, builder, schedule);
+    createCombinedArefOps(getEnterOps, getExitOps, aref, builder, schedule,
+                          lastPutExit);
 
     for (auto putEnterOp : putEnterOps)
       putEnterOp->erase();
