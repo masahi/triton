@@ -503,7 +503,8 @@ ExitOp createCombinedArefOps(SmallVector<EnterOp> &enterOps,
   llvm::SmallVector<Attribute> producersOrConsumers(opAttrsSet.begin(),
                                                     opAttrsSet.end());
 
-  if (enterInsertPoint) {
+  // TODO
+  if (false && enterInsertPoint) {
     // Combine get enter need to be placed after combined put exit
     builder.setInsertionPoint(enterInsertPoint);
   } else {
