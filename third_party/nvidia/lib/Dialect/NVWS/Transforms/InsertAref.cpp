@@ -100,7 +100,9 @@ SmallVector<ProducedValueInfo> getProducedValues(Operation *op,
     return producedValues;
   }
   for (auto result : op->getResults()) {
-    if (isDescLoadAndAlloc(result)) {
+    // TODO: Other producer ops
+    if (isa<triton::DescriptorOpInterface>(result.getDefiningOp()) ||
+        isDescLoadAndAlloc(result)) {
       producedValues.push_back({partition, result});
     }
   }
@@ -270,6 +272,18 @@ SmallVector<Operation *> createArefPut(PartitionBuilder &builder, ArefCreateOp a
     staleOps.push_back(descOp);
   } else if (isGlobalLoadAndAlloc(result)) {
     llvm_unreachable("cpasync not supported yet");
+  } else if (auto tensorType = dyn_cast<RankedTensorType>(result.getType())) {
+    auto op = result.getDefiningOp();
+    if (op && isa<triton::DescriptorOpInterface>(op)) {
+      createNVWSDescriptorLoadOp(builder, op, dataBuf, producerPartition, schedule, loc);
+      producerKind = AsyncOp::TMALoad;
+      staleOps.push_back(op);
+    } else if (op && isa<triton::LoadOp>(op)) {
+      llvm_unreachable("cpasync not supported yet");
+    } else {
+      auto storeOp = builder.create<LocalStoreOp>(loc, result, dataBuf);
+      schedule.insert(producerPartition, storeOp);
+    }
   } else {
     llvm_unreachable("unsupported type");
   }
@@ -404,6 +418,12 @@ void createArefGet(PartitionBuilder &builder, ArefCreateOp aref, std::string are
     if (auto mmav5 = dyn_cast<MMAv5OpInterface>(consumers.front())) {
       mmav5.setIsAsync(true);
     }
+  } else if (auto tensorType = dyn_cast<RankedTensorType>(result.getType())) {
+    auto localLoadOp =
+        builder.create<LocalLoadOp>(loc, tensorType, dataBuf);
+    newOperand = localLoadOp.getResult();
+    schedule.insert(consumerPartition, localLoadOp);
+    createExit(AsyncOp::NONE);
   } else {
     llvm_unreachable("unsupported type");
   }
@@ -447,9 +467,9 @@ bool insertArefs(PartitionBuilder &builder, scf::ForOp loop, WarpSchedule &sched
       }
     }
   }
-  if (!consumerPartition)
+  if (!consumerPartition) {
     return false;
-
+  }
   // we also enforce that there is at least one user of the result
   assert(llvm::count_if(result.getUsers(), [](auto) { return true; }) >= 1);
 
