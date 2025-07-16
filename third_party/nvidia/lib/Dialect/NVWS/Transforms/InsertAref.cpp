@@ -264,17 +264,17 @@ MemDescType getDataMemDescType(MemDescType memDescType, bool mutableMemory) {
                           memDescType.getMemorySpace(), mutableMemory);
 };
 
-Value mkConstant(OpBuilder &builder, Location loc, int value, int width,
+Value mkConstant(PartitionBuilder &builder, StageCluster stageCluster, int value, int width,
                  Partition *partition, WarpSchedule &schedule) {
-  auto constValue = builder.create<arith::ConstantIntOp>(loc, value, width);
-  if (partition) {
-    schedule.insert(partition, constValue);
-  }
+  assert(partition);
+  auto constValue = builder.createInto<arith::ConstantIntOp>(
+      *partition, stageCluster, value, width);
+  schedule.insert(partition, constValue);
 
   return constValue;
 }
 
-SmallVector<Operation *> createArefPut(OpBuilder &builder, ArefCreateOp aref,
+SmallVector<Operation *> createArefPut(PartitionBuilder &builder, ArefCreateOp aref,
                                        std::string arefTag,
                                        ProducedValueInfo producedValue,
                                        Partition *producerPartition,
@@ -283,12 +283,13 @@ SmallVector<Operation *> createArefPut(OpBuilder &builder, ArefCreateOp aref,
   auto arefBufType = cast<MemDescType>(aref.getOperand(0).getType());
   Value result = producedValue.result;
   auto dataBufType = getDataMemDescType(arefBufType, true);
+  StageCluster stageCluster = getStageCluster(result.getDefiningOp());
 
   SmallVector<Type> buffers{dataBufType};
 
-  auto putEnterOp = builder.create<ArefPutEnterOp>(
-      loc, buffers, aref,
-      mkConstant(builder, loc, 0, 32, producerPartition, schedule));
+  auto putEnterOp = builder.createInto<ArefPutEnterOp>(
+      *producerPartition, stageCluster, buffers, aref,
+      mkConstant(builder, stageCluster, 0, 32, producerPartition, schedule));
   schedule.insert(producerPartition, putEnterOp);
   putEnterOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
   auto dataBuf = putEnterOp.getResults()[0];
@@ -309,8 +310,9 @@ SmallVector<Operation *> createArefPut(OpBuilder &builder, ArefCreateOp aref,
     llvm_unreachable("unsupported type");
   }
 
-  auto putExitOp = builder.create<ArefPutExitOp>(
-      loc, aref, mkConstant(builder, loc, 0, 32, producerPartition, schedule),
+  auto putExitOp = builder.createInto<ArefPutExitOp>(
+      *producerPartition, stageCluster, aref,
+      mkConstant(builder, stageCluster, 0, 32, producerPartition, schedule),
       builder.getArrayAttr(SmallVector<Attribute>{
           AsyncOpAttr::get(aref.getContext(), producerKind)}));
   putExitOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
@@ -396,7 +398,7 @@ Operation *getExitInsertPoint(Block *producerBlock,
   return nullptr;
 }
 
-void createArefGet(OpBuilder &builder, ArefCreateOp aref, std::string arefTag,
+void createArefGet(PartitionBuilder &builder, ArefCreateOp aref, std::string arefTag,
                    ProducedValueInfo producedValue,
                    SetVector<Operation *> users, Partition *consumerPartition,
                    WarpSchedule &schedule) {
@@ -405,11 +407,12 @@ void createArefGet(OpBuilder &builder, ArefCreateOp aref, std::string arefTag,
   auto arefBufType = cast<MemDescType>(aref.getOperand(0).getType());
 
   Value result = producedValue.result;
+  StageCluster stageCluster = getStageCluster(result.getDefiningOp());
 
   SmallVector<Type> buffers{getDataMemDescType(arefBufType, false)};
-  auto getEnterOp = builder.create<ArefGetEnterOp>(
-      loc, buffers, aref,
-      mkConstant(builder, loc, 0, 32, consumerPartition, schedule));
+  auto getEnterOp = builder.createInto<ArefGetEnterOp>(
+						       *consumerPartition, stageCluster, buffers, aref,
+      mkConstant(builder, stageCluster, 0, 32, consumerPartition, schedule));
   Value dataBuf = getEnterOp.getResults()[0];
   schedule.insert(consumerPartition, getEnterOp);
   getEnterOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
@@ -418,8 +421,8 @@ void createArefGet(OpBuilder &builder, ArefCreateOp aref, std::string arefTag,
     SmallVector<Attribute> consumerAttr{
         AsyncOpAttr::get(aref.getContext(), consumerKind)};
     auto consumersAttr = builder.getArrayAttr(consumerAttr);
-    auto getExitOp = builder.create<ArefGetExitOp>(
-        loc, aref, mkConstant(builder, loc, 0, 32, consumerPartition, schedule),
+    auto getExitOp = builder.createInto<ArefGetExitOp>(
+        *consumerPartition, stageCluster, aref, mkConstant(builder, stageCluster, 0, 32, consumerPartition, schedule),
         consumersAttr);
     getExitOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
     schedule.insert(consumerPartition, getExitOp);
@@ -454,12 +457,10 @@ void createArefGet(OpBuilder &builder, ArefCreateOp aref, std::string arefTag,
   }
 };
 
-bool insertArefs(OpBuilder &builder, scf::ForOp loop, WarpSchedule &schedule,
+bool insertArefs(PartitionBuilder &builder, scf::ForOp loop, WarpSchedule &schedule,
                  ProducedValueInfo producedValue, int arefTag) {
   Partition *consumerPartition = nullptr;
   auto [producerPartition, result] = producedValue;
-  // llvm::outs() << "produced value\n";
-  // producedValue.result.getDefiningOp()->dump();
   assert(producerPartition);
   for (auto &useOpnd : result.getUses()) {
     SmallVector<Partition *> userPartitions;
@@ -576,7 +577,7 @@ void runArefInsertionOnLoop(scf::ForOp loop, WarpSchedule &schedule) {
     // otherwise we need to place put/get
     auto producedValues = getProducedValues(op, schedule);
     for (auto producedValue : producedValues) {
-      OpBuilder builder(op);
+      PartitionBuilder builder(op->getLoc(), op);
       builder.setInsertionPointAfter(op);
       if (insertArefs(builder, loop, schedule, producedValue, arefTag))
         arefTag++;
@@ -587,7 +588,7 @@ void runArefInsertionOnLoop(scf::ForOp loop, WarpSchedule &schedule) {
 template <typename EnterOp, typename ExitOp>
 void createCombinedArefOps(SmallVector<EnterOp> &enterOps,
                            SmallVector<ExitOp> &exitOps,
-                           ArefCreateOp aref, OpBuilder &builder, WarpSchedule& schedule) {
+                           ArefCreateOp aref, PartitionBuilder &builder, WarpSchedule& schedule) {
   auto firstEnter = *llvm::min_element(enterOps, [](auto a, auto b) {
     assert(a->getBlock() == b->getBlock());
     return a->isBeforeInBlock(b);
@@ -617,13 +618,15 @@ void createCombinedArefOps(SmallVector<EnterOp> &enterOps,
 
   // TODO: Use dominance to properly place the combined get enter after the combined put exit
   builder.setInsertionPoint(firstEnter);
+  StageCluster stageCluster = getStageCluster(firstEnter);
+  auto partition = schedule.getPartition(firstEnter);
   auto zero =
-    mkConstant(builder, firstEnter->getLoc(), 0, 32, schedule.getPartition(firstEnter), schedule);
-  auto enter = builder.create<EnterOp>(firstEnter->getLoc(), arefEnterBuffers,
+    mkConstant(builder, stageCluster, 0, 32, partition, schedule);
+  auto enter = builder.createInto<EnterOp>(*partition, stageCluster, arefEnterBuffers,
                                        aref, zero);
   builder.setInsertionPoint(lastExit);
   auto exit =
-      builder.create<ExitOp>(lastExit->getLoc(), aref, zero,
+      builder.createInto<ExitOp>(*partition, stageCluster, aref, zero,
                              builder.getArrayAttr(producersOrConsumers));
 
   for (auto [idx, enterOp] : llvm::enumerate(enterOps))
@@ -631,7 +634,7 @@ void createCombinedArefOps(SmallVector<EnterOp> &enterOps,
 
   for (auto op : SmallVector<Operation *>{enter, exit}) {
     op->setAttr("aref_tag", firstEnter->getAttr("aref_tag"));
-    schedule.insert(schedule.getPartition(firstEnter), op);
+    schedule.insert(partition, op);
   }
 }
 
@@ -795,7 +798,7 @@ void combineArefs(scf::ForOp loop, WarpSchedule &schedule) {
       assert(a->getBlock() == b->getBlock());
       return a->isBeforeInBlock(b);
     });
-    OpBuilder builder(lastAref);
+    PartitionBuilder builder(lastAref->getLoc(), lastAref);
     auto arefTy =
         ArefType::get(builder.getContext(),
                       TypeArrayAttr::get(builder.getContext(), arefBufTypes));
