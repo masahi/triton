@@ -407,7 +407,8 @@ LogicalResult insertArriveBarrier(Location loc, ArrayAttr asyncOps,
 
   for (auto asyncOp : asyncOps) {
     auto asyncOpEnum = cast<AsyncOpAttr>(asyncOp).getValue();
-    auto op = rewriter.create<nvws::ArefCompleteOp>(loc, mbar, asyncOpEnum);
+    auto op = rewriter.create<nvws::ArefCompleteOp>(loc, mbar, asyncOpEnum,
+                                                    /*pred=*/Value());
     assignStageCluster(op, stageCluster, rewriter);
   }
 
