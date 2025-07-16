@@ -21,6 +21,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
+#include "Utilities.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/AttrTypeSubElements.h"
@@ -667,35 +668,6 @@ template <> struct ArefIndex<> {
   }
 };
 
-MemDescType getDataMemDescType(MemDescType memDescType, bool mutableMemory) {
-  auto shape = memDescType.getShape();
-  SmallVector<int64_t> dataShape(shape.begin() + 1, shape.end());
-  return MemDescType::get(dataShape, memDescType.getElementType(),
-                          memDescType.getEncoding(),
-                          memDescType.getMemorySpace(), mutableMemory);
-};
-
-Operation *createAlloc(OpBuilder &builder, Location loc,
-                       MemDescType memDescType, Value src) {
-  if (isa<SharedMemorySpaceAttr>(memDescType.getMemorySpace()))
-    return builder.create<LocalAllocOp>(loc, memDescType, src);
-  else {
-    assert(isa<triton::nvidia_gpu::TensorMemorySpaceAttr>(
-        memDescType.getMemorySpace()));
-    return builder.create<triton::nvidia_gpu::TMEMAllocOp>(loc, memDescType,
-                                                           src);
-  }
-}
-
-MemDescType getArefbufMemDescType(MemDescType memDescType, int32_t AREF_SIZE) {
-  auto shape = memDescType.getShape();
-  SmallVector<int64_t> bufferShape(shape.begin(), shape.end());
-  bufferShape.insert(bufferShape.begin(), AREF_SIZE);
-  return MemDescType::get(bufferShape, memDescType.getElementType(),
-                          memDescType.getEncoding(),
-                          memDescType.getMemorySpace(), true);
-}
-
 void assignDepth(ModuleOp mod, int numStages) {
   SmallVector<ArefCreateOp> arefOps;
   mod.walk([&](ArefCreateOp arefOp) { arefOps.push_back(arefOp); });
@@ -738,7 +710,8 @@ void assignDepth(ModuleOp mod, int numStages) {
           getDataMemDescType(arefBufType, true), depth);
       auto oldAlloc = opnd.getDefiningOp();
       auto loc = oldAlloc->getLoc();
-      Operation *newAlloc = createAlloc(builder, loc, arefBufType, Value());
+      Operation *newAlloc =
+	triton::nvws::createAlloc(builder, loc, arefBufType, Value());
       newAlloc->setAttr("aref_buffer", builder.getUnitAttr());
       allocOps.push_back(newAlloc->getResult(0));
       arefTypes.push_back(arefBufType);

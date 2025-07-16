@@ -1,3 +1,4 @@
+#include "Utilities.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -45,27 +46,6 @@ struct ProducedValueInfo {
   Partition *partition;
   Value result; // result being produced
 };
-
-Operation *createAlloc(OpBuilder &builder, Location loc,
-                       MemDescType memDescType, Value src) {
-  if (isa<SharedMemorySpaceAttr>(memDescType.getMemorySpace()))
-    return builder.create<LocalAllocOp>(loc, memDescType, src);
-  else {
-    assert(isa<triton::nvidia_gpu::TensorMemorySpaceAttr>(
-        memDescType.getMemorySpace()));
-    return builder.create<triton::nvidia_gpu::TMEMAllocOp>(loc, memDescType,
-                                                           src);
-  }
-}
-
-MemDescType getArefbufMemDescType(MemDescType memDescType, int32_t AREF_SIZE) {
-  auto shape = memDescType.getShape();
-  SmallVector<int64_t> bufferShape(shape.begin(), shape.end());
-  bufferShape.insert(bufferShape.begin(), AREF_SIZE);
-  return MemDescType::get(bufferShape, memDescType.getElementType(),
-                          memDescType.getEncoding(),
-                          memDescType.getMemorySpace(), true);
-}
 
 bool isDescLoadAndAlloc(Value result) {
   auto alloc = result.getDefiningOp<LocalAllocOp>();
@@ -157,7 +137,7 @@ ArefCreateOp createAref(OpBuilder &builder, ProducedValueInfo &producedValue) {
       ArefType::get(builder.getContext(),
                     TypeArrayAttr::get(builder.getContext(), arefBufType));
   assert((isa<SharedMemorySpaceAttr>(arefBufType.getMemorySpace())));
-  auto alloc = createAlloc(builder, loc, arefBufType, Value());
+  auto alloc = triton::nvws::createAlloc(builder, loc, arefBufType, Value());
   alloc->setAttr("aref_buffer", builder.getUnitAttr());
   return builder.create<ArefCreateOp>(loc, arefTy, alloc->getResult(0));
 }
@@ -201,14 +181,6 @@ void createNVWSDescriptorLoadOp(OpBuilder &builder, Operation *ttDescLoadOp,
     llvm_unreachable("unknown descriptor op.");
   }
 }
-
-MemDescType getDataMemDescType(MemDescType memDescType, bool mutableMemory) {
-  auto shape = memDescType.getShape();
-  SmallVector<int64_t> dataShape(shape.begin() + 1, shape.end());
-  return MemDescType::get(dataShape, memDescType.getElementType(),
-                          memDescType.getEncoding(),
-                          memDescType.getMemorySpace(), mutableMemory);
-};
 
 Value mkConstant(PartitionBuilder &builder, StageCluster stageCluster,
                  int value, int width, Partition *partition,
