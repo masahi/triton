@@ -439,8 +439,6 @@ ExitOp createCombinedArefOps(SmallVector<EnterOp> &enterOps,
 
   StageCluster stageCluster = getStageCluster(firstEnter);
   auto partition = schedule.getPartition(firstEnter);
-  auto zero =
-      mkConstant(builder, firstEnter.getLoc(), 0, 32, partition, schedule);
 
   // TODO
   if (false && enterInsertPoint) {
@@ -450,9 +448,10 @@ ExitOp createCombinedArefOps(SmallVector<EnterOp> &enterOps,
     builder.setInsertionPoint(firstEnter);
   }
 
+  auto zero =
+      mkConstant(builder, firstEnter.getLoc(), 0, 32, partition, schedule);
   auto enter = builder.createInto<EnterOp>(*partition, stageCluster,
                                            arefEnterBuffers, aref, zero);
-
   builder.setInsertionPoint(lastExit);
   llvm::SmallVector<Attribute> AsyncOpAttrs(opAttrsSet.begin(),
                                             opAttrsSet.end());
