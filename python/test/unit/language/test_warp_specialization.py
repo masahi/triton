@@ -270,6 +270,7 @@ def test_warp_specialize_tma_matmul(M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_S
                                         BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, GROUP_SIZE_M, num_warps=num_warps,
                                         USE_FP8=use_fp8)
     ttgir = kernel.asm["ttgir"]
+    print(ttgir, flush=True)
     assert "ttng.tc_gen5_mma" in ttgir
     assert "ttg.warp_specialize" in ttgir
 
@@ -361,6 +362,7 @@ def test_warp_specialize_tma_matmul_persistent(M, N, K, BLOCK_SIZE_M, BLOCK_SIZE
                                                    BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, GROUP_SIZE_M, NUM_SMS,
                                                    num_warps=num_warps, USE_FP8=use_fp8)
     ttgir = kernel.asm["ttgir"]
+    print(ttgir)
     assert "ttng.tc_gen5_mma" in ttgir
     assert "ttg.warp_specialize" in ttgir
 
@@ -455,3 +457,9 @@ def test_warp_specialize_attention_forward(M, N, BLOCK_M, HEAD_DIM, num_stages, 
     torch.testing.assert_close(acc.to(torch.float32), acc_ref.to(torch.float32), atol=0, rtol=0)
     torch.testing.assert_close(l_i.to(torch.float32), l_i_ref.to(torch.float32), atol=0, rtol=0)
     torch.testing.assert_close(m_i.to(torch.float32), m_i_ref.to(torch.float32), atol=0, rtol=0)
+
+
+# test_warp_specialize_tma_matmul(1024, 1024, 1024, 128, 128, 64, 3, 4, False)
+# test_warp_specialize_tma_matmul_persistent(1024, 1024, 1024, 128, 128, 64, 3, 4, False)
+
+test_warp_specialize_attention_forward(1024, 1024, 128, 128, 2, True, 4, False)

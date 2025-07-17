@@ -6,6 +6,7 @@
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Support/LLVM.h"
+#include "nvidia/include/Dialect/NVWS/IR/Dialect.h"
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
@@ -244,6 +245,16 @@ Operation *mlir::triton::predicateOp(RewriterBase &rewriter, Operation *op,
     return op;
   }
   if (auto arriveBarrier = dyn_cast<ttng::ArriveBarrierOp>(op)) {
+    rewriter.setInsertionPoint(arriveBarrier);
+    Value mask = pred;
+    Value currentPred = arriveBarrier.getPred();
+    if (currentPred) {
+      mask = getPredMask(rewriter, currentPred.getType(), currentPred, pred);
+    }
+    arriveBarrier.getPredMutable().assign(mask);
+    return op;
+  }
+  if (auto arriveBarrier = dyn_cast<nvws::AsyncCompleteOp>(op)) {
     rewriter.setInsertionPoint(arriveBarrier);
     Value mask = pred;
     Value currentPred = arriveBarrier.getPred();
