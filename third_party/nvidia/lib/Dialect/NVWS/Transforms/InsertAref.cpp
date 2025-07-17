@@ -518,7 +518,7 @@ void combineArefs(scf::ForOp loop, WarpSchedule &schedule) {
   loop.walk([&](ArefGetEnterOp op) { getEnterOps.push_back(op); });
 
   DominanceInfo domInfo(loop);
-  llvm::MapVector<ArrayRef<Operation *>, SmallVector<ArefGetEnterOp>>
+  llvm::DenseMap<SmallVector<Operation *>, SmallVector<ArefGetEnterOp>>
       liveBeforeGroups;
   for (auto getEnterOp : getEnterOps) {
     auto liveBeforeOps =
