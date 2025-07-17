@@ -278,10 +278,11 @@ void lowerTMALoad(ArefPutEnterOp op, PatternRewriter &rewriter,
 
   // locate the matching aref_put.exit with the same tag, to get full barrier
   ArefPutExitOp arefPutExitOp;
-  auto arefTag = op->getAttrOfType<StringAttr>("aref_tag").str();
+  auto arefTag = op->getAttrOfType<StringAttr>(kArefTagAttrName).str();
   for (auto user : op.getAref().getUsers()) {
     if (auto exitOp = dyn_cast<ArefPutExitOp>(user)) {
-      if (exitOp->getAttrOfType<StringAttr>("aref_tag").str() == arefTag) {
+      if (exitOp->getAttrOfType<StringAttr>(kArefTagAttrName).str() ==
+          arefTag) {
         arefPutExitOp = exitOp;
         break;
       }
@@ -780,7 +781,7 @@ ExitOp createCombinedArefOps(SmallVector<EnterOp> &enterOps,
   }
 
   for (auto op : SmallVector<Operation *>{enter, exit}) {
-    op->setAttr("aref_tag", firstEnter->getAttr("aref_tag"));
+    op->setAttr(kArefTagAttrName, firstEnter->getAttr(kArefTagAttrName));
   }
 
   return lastExit;

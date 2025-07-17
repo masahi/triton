@@ -7,6 +7,8 @@ namespace mlir {
 namespace triton {
 namespace nvws {
 
+static const char *kArefTagAttrName = "aref_tag";
+
 gpu::MemDescType getDataMemDescType(gpu::MemDescType memDescType,
                                     bool mutableMemory);
 

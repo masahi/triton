@@ -217,8 +217,9 @@ SmallVector<Operation *> createArefPut(PartitionBuilder &builder,
       *producerPartition, stageCluster, buffers, aref,
       mkConstant(builder, loc, 0, 32, producerPartition, schedule));
   schedule.insert(producerPartition, putEnterOp);
-  // TODO: is this necessary
-  putEnterOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
+  // Attach a "tag" to each put enter / exit pair, to easily identify them
+  // as a matching pair in later analysis.
+  putEnterOp->setAttr(kArefTagAttrName, builder.getStringAttr(arefTag));
   auto dataBuf = putEnterOp.getResults()[0];
 
   auto producerKind = AsyncOp::NONE;
@@ -255,7 +256,7 @@ SmallVector<Operation *> createArefPut(PartitionBuilder &builder,
       mkConstant(builder, loc, 0, 32, producerPartition, schedule),
       builder.getArrayAttr(SmallVector<Attribute>{
           AsyncOpAttr::get(aref.getContext(), producerKind)}));
-  putExitOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
+  putExitOp->setAttr(kArefTagAttrName, builder.getStringAttr(arefTag));
   schedule.insert(producerPartition, putExitOp);
   return staleOps;
 };
@@ -314,7 +315,7 @@ void createArefGet(PartitionBuilder &builder, ArefCreateOp aref,
       mkConstant(builder, loc, 0, 32, consumerPartition, schedule));
   Value dataBuf = getEnterOp.getResults()[0];
   schedule.insert(consumerPartition, getEnterOp);
-  getEnterOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
+  getEnterOp->setAttr(kArefTagAttrName, builder.getStringAttr(arefTag));
 
   auto consumers = getTransitiveConsumers(result.getDefiningOp());
   auto asyncKinds = getConsumerAsyncOpKinds(consumers, aref.getContext());
@@ -338,7 +339,7 @@ void createArefGet(PartitionBuilder &builder, ArefCreateOp aref,
       mkConstant(builder, loc, 0, 32, consumerPartition, schedule),
       builder.getArrayAttr(asyncKinds));
 
-  getExitOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
+  getExitOp->setAttr(kArefTagAttrName, builder.getStringAttr(arefTag));
   schedule.insert(consumerPartition, getExitOp);
 
   for (auto consumer : consumers) {
