@@ -67,7 +67,7 @@ SmallVector<ProducedValueInfo> getProducedValues(Operation *op, Block *loopBody,
   SmallVector<ProducedValueInfo> producedValues;
   auto partition = schedule.getPartition(loopBody->findAncestorOpInBlock(*op));
   if (partition == schedule.getRootPartition()) {
-    return producedValues;
+    return {};
   }
   for (auto result : op->getResults()) {
     // TODO: Other producer ops
@@ -469,102 +469,77 @@ ExitOp createCombinedArefOps(SmallVector<EnterOp> &enterOps,
   return lastExit;
 }
 
-void combineArefs(scf::ForOp loop, WarpSchedule &schedule) {
-  std::function<ArefCreateOp(Value)> findAref =
-      [&](Value opnd) -> ArefCreateOp {
-    if (!opnd)
-      return {};
-    if (auto op = opnd.getDefiningOp()) {
-      if (isa<WarpGroupDotOp, MMAv5OpInterface>(op)) {
-        // TODO, more proper check
-        return {};
-      } else if (auto enterOp = dyn_cast<ArefGetEnterOp>(op)) {
-        return cast<ArefCreateOp>(enterOp.getAref().getDefiningOp());
-      } else {
-        for (auto operand : op->getOperands())
-          if (auto aref = findAref(operand))
-            return aref;
-      }
+void findSharedMemorySinkOps(Value value,
+                             SmallVectorImpl<Operation *> &sinkOps) {
+  for (Operation *user : value.getUsers()) {
+    if (isa<MMAv5OpInterface, LocalLoadOp>(user)) {
+      sinkOps.push_back(user);
+    } else if (user->hasTrait<OpTrait::MemDescViewTrait>()) {
+      findSharedMemorySinkOps(user->getResult(0), sinkOps);
+    } else {
+      mlir::emitWarning(user->getLoc(),
+                        "failed to warp specialize: cannot handle sink "
+                        "of in-memory load operation");
     }
-    return {};
-  };
+  }
+}
+
+SmallVector<Operation *> getDominantConsumers(ArefGetEnterOp getEnterOp,
+                                              Block &container,
+                                              DominanceInfo &domInfo,
+                                              WarpSchedule &schedule) {
+  SmallVector<Operation *> liveBeforeOps;
+  llvm::MapVector<Partition *, SmallVector<Operation *>> shmemSinks;
+  assert(getEnterOp->getNumResults() && "Expect a single-result ArefGenterOp");
+  auto buf = getEnterOp->getResult(0);
+  SmallVector<Operation *> sinkOps;
+  findSharedMemorySinkOps(buf, sinkOps);
+
+  for (Operation *sinkOp : sinkOps) {
+    shmemSinks[schedule.getPartition(sinkOp)].push_back(sinkOp);
+  }
+
+  SetVector<Partition *> userPartitions;
+  userPartitions.insert_range(llvm::make_first_range(shmemSinks));
+
+  // The result must be live before all the sinks in each partition.
+  for (Partition *userPartition : userPartitions) {
+    SmallVector<Operation *> shmemSink = shmemSinks.lookup(userPartition);
+    Operation *liveBeforeOp = findNearestCommonDominator(shmemSink, domInfo);
+    liveBeforeOp = container.findAncestorOpInBlock(*liveBeforeOp);
+    liveBeforeOps.push_back(liveBeforeOp);
+  }
+
+  return liveBeforeOps;
+}
+
+void combineArefs(scf::ForOp loop, WarpSchedule &schedule) {
+  SmallVector<ArefGetEnterOp> getEnterOps;
+  loop.walk([&](ArefGetEnterOp op) { getEnterOps.push_back(op); });
+
+  DominanceInfo domInfo(loop);
+  llvm::MapVector<ArrayRef<Operation *>, SmallVector<ArefGetEnterOp>>
+      liveBeforeGroups;
+  for (auto getEnterOp : getEnterOps) {
+    auto liveBeforeOps =
+        getDominantConsumers(getEnterOp, *loop.getBody(), domInfo, schedule);
+    liveBeforeGroups[liveBeforeOps].push_back(getEnterOp);
+  }
 
   SmallVector<SmallVector<ArefCreateOp>> arefsToFuse;
-  loop.walk([&](Operation *op) {
-    Value Aopnd, Bopnd, AScaleOpnd, BScaleOpnd;
-    if (auto wgmma = dyn_cast<WarpGroupDotOp>(op)) {
-      Aopnd = wgmma.getA();
-      Bopnd = wgmma.getB();
-    } else if (auto mmav5 = dyn_cast<TCGen5MMAOp>(op)) {
-      Aopnd = mmav5.getA();
-      Bopnd = mmav5.getB();
-    } else if (auto mmav5scaled = dyn_cast<TCGen5MMAScaledOp>(op)) {
-      Aopnd = mmav5scaled.getA();
-      Bopnd = mmav5scaled.getB();
-      AScaleOpnd = mmav5scaled.getAScale();
-      BScaleOpnd = mmav5scaled.getBScale();
-    } else {
-      return WalkResult::advance();
+  for (auto getEnterOps : llvm::make_second_range(liveBeforeGroups)) {
+    if (getEnterOps.size() == 1) {
+      continue;
     }
 
-    auto usedInTheSameBlock = [](ArefCreateOp arefA, ArefCreateOp arefB) {
-      Block *putABlock, *getABlock;
-      Block *putBBlock, *getBBlock;
-      for (auto user : arefA->getUsers()) {
-        if (isa<ArefPutEnterOp>(user)) {
-          putABlock = user->getBlock();
-        } else if (isa<ArefGetEnterOp>(user)) {
-          getABlock = user->getBlock();
-        }
-      }
-
-      for (auto user : arefB->getUsers()) {
-        if (isa<ArefPutEnterOp>(user)) {
-          putBBlock = user->getBlock();
-        } else if (isa<ArefGetEnterOp>(user)) {
-          getBBlock = user->getBlock();
-        }
-      }
-
-      return putABlock == putBBlock && getABlock == getBBlock;
-    };
-
-    auto usedOnce = [](ArefCreateOp aref) {
-      return llvm::count_if(aref->getUsers(), [](auto) { return true; }) == 4;
-    };
-
-    // verify that all put/gets are in the same BB
-    auto arefA = findAref(Aopnd);
-    auto arefB = findAref(Bopnd);
     SmallVector<ArefCreateOp> arefs;
-    if (arefA && arefB && usedOnce(arefA) && usedOnce(arefB) &&
-        usedInTheSameBlock(arefA, arefB)) {
-      arefs.push_back(arefA);
-      arefs.push_back(arefB);
-    } else {
-      return WalkResult::advance();
+    for (auto getEnterOp : getEnterOps) {
+      arefs.push_back(cast<ArefCreateOp>(getEnterOp.getAref().getDefiningOp()));
     }
 
-    auto arefAScale = findAref(AScaleOpnd);
-    if (arefAScale &&
-        isa<SharedMemorySpaceAttr>(
-            cast<MemDescType>(AScaleOpnd.getType()).getMemorySpace()) &&
-        usedOnce(arefAScale) && usedInTheSameBlock(arefAScale, arefA))
-      arefs.push_back(arefAScale);
+    arefsToFuse.push_back(arefs);
+  }
 
-    auto arefBScale = findAref(BScaleOpnd);
-    if (arefBScale &&
-        isa<SharedMemorySpaceAttr>(
-            cast<MemDescType>(BScaleOpnd.getType()).getMemorySpace()) &&
-        usedOnce(arefBScale) && usedInTheSameBlock(arefBScale, arefA))
-      arefs.push_back(arefBScale);
-
-    if (!arefs.empty())
-      arefsToFuse.push_back(arefs);
-    return WalkResult::advance();
-  });
-
-  //   now fuse arefs
   for (auto arefs : arefsToFuse) {
     SmallVector<ArefPutEnterOp> putEnterOps;
     SmallVector<ArefPutExitOp> putExitOps;
