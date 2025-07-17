@@ -290,8 +290,8 @@ SetVector<AsyncOp> getConsumerKinds(const SetVector<Operation *> &consumers) {
 
 void createArefGet(PartitionBuilder &builder, ArefCreateOp aref,
                    std::string arefTag, ProducedValueInfo producedValue,
-                   SetVector<Operation *> users, Partition *consumerPartition,
-                   WarpSchedule &schedule, PostDominanceInfo &postDomInfo) {
+                   Partition *consumerPartition, WarpSchedule &schedule,
+                   PostDominanceInfo &postDomInfo) {
   OpBuilder::InsertionGuard g(builder);
   auto loc = producedValue.result.getLoc();
   auto arefBufType = cast<MemDescType>(aref.getOperand(0).getType());
@@ -310,14 +310,14 @@ void createArefGet(PartitionBuilder &builder, ArefCreateOp aref,
   auto consumers = getTransitiveConsumers(result.getDefiningOp());
   Value newOperand;
   if (auto memDescType = dyn_cast<MemDescType>(result.getType())) {
-    newOperand = dataBuf;
     auto insertPoint = *llvm::min_element(consumers, [&](auto &lhs, auto &rhs) {
       return postDomInfo.postDominates(lhs, rhs);
     });
     builder.setInsertionPointAfter(insertPoint);
+    result.replaceAllUsesWith(dataBuf);
   } else if (auto tensorType = dyn_cast<RankedTensorType>(result.getType())) {
     auto localLoadOp = builder.create<LocalLoadOp>(loc, tensorType, dataBuf);
-    newOperand = localLoadOp.getResult();
+    result.replaceAllUsesWith(localLoadOp.getResult());
     schedule.insert(consumerPartition, localLoadOp);
   } else {
     llvm_unreachable("unsupported type");
@@ -339,18 +339,6 @@ void createArefGet(PartitionBuilder &builder, ArefCreateOp aref,
     if (auto mmav5 = dyn_cast<MMAv5OpInterface>(consumer)) {
       mmav5.setIsAsync(true);
     }
-  }
-
-  // update result operand with newOperand
-  for (auto user : users) {
-    bool updatedOperand = false;
-    for (auto [i, operand] : llvm::enumerate(user->getOperands())) {
-      if (result == operand) {
-        user->setOperand(i, newOperand);
-        updatedOperand = true;
-      }
-    }
-    assert(updatedOperand);
   }
 };
 
@@ -374,9 +362,6 @@ bool insertArefs(PartitionBuilder &builder, scf::ForOp loop,
   // we also enforce that there is at least one user of the result
   assert(llvm::count_if(result.getUsers(), [](auto) { return true; }) >= 1);
 
-  SetVector<Operation *> users(result.getUsers().begin(),
-                               result.getUsers().end());
-
   ArefCreateOp aref;
   {
     OpBuilder::InsertionGuard g(builder);
@@ -389,8 +374,8 @@ bool insertArefs(PartitionBuilder &builder, scf::ForOp loop,
                                 producerPartition, schedule);
 
   PostDominanceInfo postDomInfo(loop);
-  createArefGet(builder, aref, tag, producedValue, users, consumerPartition,
-                schedule, postDomInfo);
+  createArefGet(builder, aref, tag, producedValue, consumerPartition, schedule,
+                postDomInfo);
 
   for (auto op : staleOps) {
     op->erase();
