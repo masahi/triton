@@ -275,17 +275,26 @@ SetVector<Operation *> getTransitiveConsumers(Operation *op) {
   return opConsumers;
 }
 
-SetVector<AsyncOp> getConsumerKinds(const SetVector<Operation *> &consumers) {
-  SetVector<AsyncOp> ret;
+SmallVector<Attribute>
+getConsumerAsyncOpKinds(const SetVector<Operation *> &consumers,
+                        MLIRContext *ctx) {
+  SetVector<AsyncOp> kindSet;
   for (auto consumer : consumers) {
     if (isa<WarpGroupDotOp>(consumer)) {
-      ret.insert(AsyncOp::WGMMA);
+      kindSet.insert(AsyncOp::WGMMA);
     } else if (auto mmav5 = dyn_cast<MMAv5OpInterface>(consumer)) {
-      ret.insert(AsyncOp::TC5MMA);
-    } else
-      ret.insert(AsyncOp::NONE);
+      kindSet.insert(AsyncOp::TC5MMA);
+    } else {
+      kindSet.insert(AsyncOp::NONE);
+    }
   }
-  return ret;
+
+  SmallVector<Attribute> kindAttrs;
+  for (auto kind : kindSet) {
+    kindAttrs.push_back(AsyncOpAttr::get(ctx, kind));
+  }
+
+  return kindAttrs;
 }
 
 void createArefGet(PartitionBuilder &builder, ArefCreateOp aref,
@@ -308,7 +317,8 @@ void createArefGet(PartitionBuilder &builder, ArefCreateOp aref,
   getEnterOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
 
   auto consumers = getTransitiveConsumers(result.getDefiningOp());
-  Value newOperand;
+  auto asyncKinds = getConsumerAsyncOpKinds(consumers, aref.getContext());
+
   if (auto memDescType = dyn_cast<MemDescType>(result.getType())) {
     auto insertPoint = *llvm::min_element(consumers, [&](auto &lhs, auto &rhs) {
       return postDomInfo.postDominates(lhs, rhs);
@@ -323,15 +333,11 @@ void createArefGet(PartitionBuilder &builder, ArefCreateOp aref,
     llvm_unreachable("unsupported type");
   }
 
-  SmallVector<Attribute> consumerAttr;
-  for (auto kind : getConsumerKinds(consumers)) {
-    consumerAttr.push_back(AsyncOpAttr::get(aref.getContext(), kind));
-  }
-  auto consumersAttr = builder.getArrayAttr(consumerAttr);
   auto getExitOp = builder.createInto<ArefGetExitOp>(
       *consumerPartition, stageCluster, aref,
       mkConstant(builder, loc, 0, 32, consumerPartition, schedule),
-      consumersAttr);
+      builder.getArrayAttr(asyncKinds));
+
   getExitOp->setAttr("aref_tag", builder.getStringAttr(arefTag));
   schedule.insert(consumerPartition, getExitOp);
 
