@@ -44,7 +44,7 @@ void AutomaticWarpSpecialization::runOnOperation() {
   // pm.addPass(arith::createIntRangeOptimizationsPass());
   pm.addPass(createSCCPPass());
   pm.addPass(createCSEPass());
-  pm.addPass(createTritonGPUPartitionLoops()); // code split + nvws.warp_group emit
+  pm.addPass(createTritonGPUPartitionLoops());
   pm.addPass(mlir::triton::createNVWSLowerAref({numStages}));
   pm.addPass(mlir::triton::createNVWSLowerWarpGroup());
 

@@ -299,7 +299,7 @@ void TCGen5MMAOp::build(OpBuilder &builder, OperationState &state, Type token,
                         ValueRange barrierPreds, bool isAsync) {
   build(builder, state, token, a, b, d, accDep, useD, pred, barriers,
         barrierPreds, isAsync ? builder.getUnitAttr() : UnitAttr(),
-	useTwoCTAs ? builder.getUnitAttr() : UnitAttr());
+        useTwoCTAs ? builder.getUnitAttr() : UnitAttr());
 }
 
 // -- TCGen5MMAScaledOp --

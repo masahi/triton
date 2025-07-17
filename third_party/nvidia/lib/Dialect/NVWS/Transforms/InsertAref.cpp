@@ -131,15 +131,11 @@ ArefCreateOp createAref(OpBuilder &builder, ProducedValueInfo &producedValue) {
     llvm_unreachable("unsupported type");
   }
 
-  auto loc = producedValue.result.getLoc();
-
-  auto arefTy =
-      ArefType::get(builder.getContext(),
-                    TypeArrayAttr::get(builder.getContext(), arefBufType));
   assert((isa<SharedMemorySpaceAttr>(arefBufType.getMemorySpace())));
+  auto loc = producedValue.result.getLoc();
   auto alloc = triton::nvws::createAlloc(builder, loc, arefBufType, Value());
   alloc->setAttr("aref_buffer", builder.getUnitAttr());
-  return builder.create<ArefCreateOp>(loc, arefTy, alloc->getResult(0));
+  return createArefCreateOp(builder, {arefBufType}, {alloc->getResult(0)}, loc);
 }
 
 int getTxCount(Operation *descOp) {

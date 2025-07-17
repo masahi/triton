@@ -301,8 +301,8 @@ void lowerTMALoad(ArefPutEnterOp op, PatternRewriter &rewriter,
 
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPoint(arefPutExitOp);
+
   for (auto loadOp : loadOps) {
-    Value pred = rewriter.create<arith::ConstantIntOp>(loc, 1, 1);
     if (auto descLoad = dyn_cast<triton::nvws::DescriptorLoadOp>(loadOp)) {
       createTMALoad(descLoad, rewriter, fullBarrier, pred);
     } else if (auto descGather =
@@ -356,7 +356,7 @@ LogicalResult rewritePutEnterOp(ArefCreateOp arefOp, ArefPutEnterOp op,
   auto views = getSubViews(arefVal, stage, loc, rewriter);
   assert(views.size() == op.getResults().size());
 
-  // TMA load need special handling as it requires fullMbarrier that
+  // TMA needs special handling as it requires fullMbarrier that
   // we need to get from matching ArefPutExitOp
   lowerTMALoad(op, rewriter, arefVal);
 
@@ -398,13 +398,15 @@ LogicalResult rewriteGetEnterOp(ArefCreateOp arefOp, ArefGetEnterOp op,
 
   for (int i = 0; i < arefVal.buffers.size(); ++i) {
     op.getResult(i).replaceAllUsesWith(views[i]);
+    // Before aref lowering, memdesc_trans consumes an immutable buffer from
+    // a get enter op. After lowering, all buffers are mutable.
     propagateMutability(views[i]);
   }
 
   return success();
 }
 
-LogicalResult insertArriveBarrier(Location loc, ArrayAttr asyncOps,
+LogicalResult insertAsyncComplete(Location loc, ArrayAttr asyncOps,
                                   PatternRewriter &rewriter, Value mbar,
                                   StageCluster stageCluster) {
 
@@ -423,7 +425,7 @@ LogicalResult rewritePutExitOp(ArefPutExitOp op, PatternRewriter &rewriter,
   auto loc = op->getLoc();
   rewriter.setInsertionPointAfter(op);
   Value fullBarrier = getFullBarrier(rewriter, loc, arefVal, op.getIndex());
-  return insertArriveBarrier(loc, op.getAsyncOps(), rewriter, fullBarrier,
+  return insertAsyncComplete(loc, op.getAsyncOps(), rewriter, fullBarrier,
                              getStageCluster(op));
 }
 
@@ -432,7 +434,7 @@ LogicalResult rewriteGetExitOp(ArefGetExitOp op, PatternRewriter &rewriter,
   auto loc = op->getLoc();
   rewriter.setInsertionPointAfter(op);
   Value emptyBarrier = getEmptyBarrier(rewriter, loc, arefVal, op.getIndex());
-  return insertArriveBarrier(loc, op.getAsyncOps(), rewriter, emptyBarrier,
+  return insertAsyncComplete(loc, op.getAsyncOps(), rewriter, emptyBarrier,
                              getStageCluster(op));
 }
 
@@ -670,7 +672,7 @@ template <> struct ArefIndex<> {
   }
 };
 
-void assignDepth(ModuleOp mod, int numStages) {
+void multiBufferAref(ModuleOp mod, int numStages) {
   SmallVector<ArefCreateOp> arefOps;
   mod.walk([&](ArefCreateOp arefOp) { arefOps.push_back(arefOp); });
 
@@ -687,20 +689,13 @@ void assignDepth(ModuleOp mod, int numStages) {
   SmallVector<Operation *> allocsToErase;
   for (auto arefOp : arefOps) {
     DenseSet<Block *> producerPartitions;
-    bool usedInLoop = true;
     for (auto user : arefOp->getUsers()) {
-      usedInLoop = usedInLoop && user->getParentOfType<scf::ForOp>();
-      // verify that aref is used in the loop
       if (auto putEnterOp = dyn_cast<ArefPutEnterOp>(user))
         producerPartitions.insert(getParentBlock(putEnterOp));
     }
-    // if not used in loop or used in multiple wgOps, do not update aref depth,
-    // do not update aref depth
-    if (!usedInLoop || producerPartitions.size() != 1)
+    // if used in multiple producer partitions, do not update aref depth
+    if (producerPartitions.size() != 1)
       continue;
-
-    // TODO: For now only load buffering is handled
-    auto depth = numStages;
 
     SmallVector<Value> allocOps;
     SmallVector<Type> arefTypes;
@@ -708,8 +703,8 @@ void assignDepth(ModuleOp mod, int numStages) {
     OpBuilder builder(arefOp);
     for (auto opnd : arefOp.getOperands()) {
       auto arefBufType = cast<MemDescType>(opnd.getType());
-      arefBufType =
-          getArefbufMemDescType(getDataMemDescType(arefBufType, true), depth);
+      arefBufType = getArefbufMemDescType(getDataMemDescType(arefBufType, true),
+                                          numStages);
       auto oldAlloc = opnd.getDefiningOp();
       auto loc = oldAlloc->getLoc();
       Operation *newAlloc =
@@ -719,11 +714,8 @@ void assignDepth(ModuleOp mod, int numStages) {
       arefTypes.push_back(arefBufType);
       allocsToErase.push_back(oldAlloc);
     }
-    auto arefTy =
-        ArefType::get(builder.getContext(),
-                      TypeArrayAttr::get(builder.getContext(), arefTypes));
     auto newAref =
-        builder.create<ArefCreateOp>(arefOp.getLoc(), arefTy, allocOps);
+        createArefCreateOp(builder, arefTypes, allocOps, arefOp.getLoc());
     arefOp.getResult().replaceAllUsesWith(newAref.getResult());
     arefOp.erase();
   }
@@ -871,16 +863,16 @@ void combineArefs(scf::ForOp loop) {
       arefBufTypes.push_back(aref.getOperands()[0].getType());
       arefBufs.push_back(aref.getOperands()[0]);
     }
+
     auto lastAref = *llvm::max_element(arefs, [](auto a, auto b) {
       assert(a->getBlock() == b->getBlock());
       return a->isBeforeInBlock(b);
     });
+
     OpBuilder builder(lastAref);
-    auto arefTy =
-        ArefType::get(builder.getContext(),
-                      TypeArrayAttr::get(builder.getContext(), arefBufTypes));
     auto aref =
-        builder.create<ArefCreateOp>(lastAref->getLoc(), arefTy, arefBufs);
+        createArefCreateOp(builder, arefBufTypes, arefBufs, lastAref->getLoc());
+
     createCombinedArefOps(putEnterOps, putExitOps, aref, builder);
     createCombinedArefOps(getEnterOps, getExitOps, aref, builder);
 
@@ -925,7 +917,7 @@ public:
     }
     LLVM_DEBUG(llvm::dbgs() << "After arefIndexAssignment\n" << m << "\n");
 
-    assignDepth(m, numStages);
+    multiBufferAref(m, numStages);
 
     mlir::RewritePatternSet patterns(context);
     patterns.add<LowerArefCreate>(context);

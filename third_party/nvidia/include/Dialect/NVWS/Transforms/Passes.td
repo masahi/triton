@@ -70,12 +70,21 @@ def NVWSLowerAref : Pass<"nvws-lower-aref", "mlir::ModuleOp"> {
 }
 
 def NVWSInsertAref: Pass<"nvws-insert-aref", "mlir::ModuleOp"> {
-  let summary = "insert arefs into the code";
+  let summary = "Insert arefs around producers and consumers of SMEM.";
 
   let description = [{
-  }];
+    To automate barrier synchronizations between producer and consumer
+    partitions, arefs are introduced in the IR. This pass handles only
+    SMEM producers and consumers.
 
-//  let constructor = "mlir::createNVWSInsertArefPass()";
+    Specifically, for producer partitions, a producing operation is
+    wrapped in an ArefPutEnterOp and ArefPutExitOp pair. A descriptor load
+    op is replaced with the corresponding NVWS op, to store its result
+    into the SMEM buffer owned by an aref. For consumer partitions, a reference
+    to the original SMEM buffer is replaced with an indirection via ArefGetEnterOp on
+    the SMEM buffer owned by an aref. ArefGetExitOp is placed after the post-dominant
+    consumer operation.
+  }];
 
   let dependentDialects = [
     "mlir::triton::nvws::NVWSDialect",
