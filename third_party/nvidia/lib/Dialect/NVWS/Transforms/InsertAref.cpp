@@ -430,15 +430,17 @@ ExitOp createCombinedArefOps(SmallVector<EnterOp> &enterOps,
 
   llvm::SmallSetVector<Attribute, 5> opAttrsSet;
   for (Operation *exitOp : exitOps) {
-    // TODO: an interface for exit op
     if (auto putExit = dyn_cast<ArefPutExitOp>(exitOp)) {
       opAttrsSet.insert(putExit.getAsyncOps()[0]);
     } else if (auto getExit = dyn_cast<ArefGetExitOp>(exitOp)) {
       opAttrsSet.insert(getExit.getAsyncOps()[0]);
     }
   }
-  llvm::SmallVector<Attribute> producersOrConsumers(opAttrsSet.begin(),
-                                                    opAttrsSet.end());
+
+  StageCluster stageCluster = getStageCluster(firstEnter);
+  auto partition = schedule.getPartition(firstEnter);
+  auto zero =
+      mkConstant(builder, firstEnter.getLoc(), 0, 32, partition, schedule);
 
   // TODO
   if (false && enterInsertPoint) {
@@ -447,16 +449,15 @@ ExitOp createCombinedArefOps(SmallVector<EnterOp> &enterOps,
   } else {
     builder.setInsertionPoint(firstEnter);
   }
-  StageCluster stageCluster = getStageCluster(firstEnter);
-  auto partition = schedule.getPartition(firstEnter);
-  auto zero =
-      mkConstant(builder, firstEnter.getLoc(), 0, 32, partition, schedule);
+
   auto enter = builder.createInto<EnterOp>(*partition, stageCluster,
                                            arefEnterBuffers, aref, zero);
+
   builder.setInsertionPoint(lastExit);
-  auto exit =
-      builder.createInto<ExitOp>(*partition, stageCluster, aref, zero,
-                                 builder.getArrayAttr(producersOrConsumers));
+  llvm::SmallVector<Attribute> AsyncOpAttrs(opAttrsSet.begin(),
+                                            opAttrsSet.end());
+  auto exit = builder.createInto<ExitOp>(*partition, stageCluster, aref, zero,
+                                         builder.getArrayAttr(AsyncOpAttrs));
 
   for (auto [idx, enterOp] : llvm::enumerate(enterOps))
     enterOp.getResult(0).replaceAllUsesWith(enter.getResult(idx));
