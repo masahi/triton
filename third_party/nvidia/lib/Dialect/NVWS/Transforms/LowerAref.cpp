@@ -801,10 +801,8 @@ void findSharedMemorySinkOps(Value value,
   }
 }
 
-SmallVector<Operation *> getDominantConsumers(ArefGetEnterOp getEnterOp,
-                                              Block &container,
-                                              DominanceInfo &domInfo) {
-  SmallVector<Operation *> liveBeforeOps;
+Operation *getDominantConsumer(ArefGetEnterOp getEnterOp, Block &container,
+                               DominanceInfo &domInfo) {
   SmallVector<Operation *> shmemSinks;
   assert(getEnterOp->getNumResults() && "Expect a single-result ArefGenterOp");
   auto buf = getEnterOp->getResult(0);
@@ -816,23 +814,20 @@ SmallVector<Operation *> getDominantConsumers(ArefGetEnterOp getEnterOp,
   }
 
   Operation *liveBeforeOp = findNearestCommonDominator(shmemSinks, domInfo);
-  liveBeforeOp = container.findAncestorOpInBlock(*liveBeforeOp);
-  liveBeforeOps.push_back(liveBeforeOp);
-
-  return liveBeforeOps;
+  return container.findAncestorOpInBlock(*liveBeforeOp);
 }
 
 void combineArefs(scf::ForOp loop) {
   SmallVector<ArefGetEnterOp> getEnterOps;
   loop.walk([&](ArefGetEnterOp op) { getEnterOps.push_back(op); });
 
+  // Arefs whose get-enter ops share the same dominant consumer can be combined
   DominanceInfo domInfo(loop);
-  llvm::DenseMap<SmallVector<Operation *>, SmallVector<ArefGetEnterOp>>
-      liveBeforeGroups;
+  llvm::DenseMap<Operation *, SmallVector<ArefGetEnterOp>> liveBeforeGroups;
   for (auto getEnterOp : getEnterOps) {
-    auto liveBeforeOps =
-        getDominantConsumers(getEnterOp, *loop.getBody(), domInfo);
-    liveBeforeGroups[liveBeforeOps].push_back(getEnterOp);
+    auto liveBeforeOp =
+        getDominantConsumer(getEnterOp, *loop.getBody(), domInfo);
+    liveBeforeGroups[liveBeforeOp].push_back(getEnterOp);
   }
 
   SmallVector<SmallVector<ArefCreateOp>> arefsToFuse;
