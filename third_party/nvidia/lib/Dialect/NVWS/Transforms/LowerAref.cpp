@@ -756,24 +756,24 @@ ExitOp createCombinedArefOps(SmallVector<EnterOp> &enterOps,
   return lastExit;
 }
 
-void findSharedMemorySinkOps(Value value,
-                             SmallVectorImpl<Operation *> &sinkOps) {
+SmallVector<Operation *> findSharedMemorySinkOps(Value value) {
+  SmallVector<Operation *> sinkOps;
   for (Operation *user : value.getUsers()) {
     if (isa<MMAv5OpInterface, LocalLoadOp>(user)) {
       sinkOps.push_back(user);
     } else if (user->hasTrait<OpTrait::MemDescViewTrait>()) {
-      findSharedMemorySinkOps(user->getResult(0), sinkOps);
+      auto rec = findSharedMemorySinkOps(user->getResult(0));
+      sinkOps.insert(sinkOps.end(), rec.begin(), rec.end());
     }
   }
+  return sinkOps;
 }
 
 Operation *getDominantConsumer(ArefGetEnterOp getEnterOp, Block &container,
                                DominanceInfo &domInfo) {
   assert(getEnterOp->getNumResults() && "Expect a single-result ArefGenterOp");
   auto buf = getEnterOp->getResult(0);
-  SmallVector<Operation *> sinkOps;
-  findSharedMemorySinkOps(buf, sinkOps);
-
+  SmallVector<Operation *> sinkOps = findSharedMemorySinkOps(buf);
   Operation *liveBeforeOp = findNearestCommonDominator(sinkOps, domInfo);
   return container.findAncestorOpInBlock(*liveBeforeOp);
 }
