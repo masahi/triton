@@ -670,10 +670,23 @@ template <> struct ArefIndex<> {
   }
 };
 
-void multiBufferAref(ModuleOp mod, int numStages) {
-  SmallVector<ArefCreateOp> arefOps;
-  mod.walk([&](ArefCreateOp arefOp) { arefOps.push_back(arefOp); });
+bool isProducerLoad(ArefCreateOp arefOp) {
+  for (auto user : arefOp.getResult().getUsers()) {
+    if (auto putOp = dyn_cast<ArefPutEnterOp>(user)) {
+      auto loop = putOp->getParentOfType<scf::ForOp>();
+      assert(loop);
+      if (loop.getOps<nvws::DescriptorLoadOpInterface>().empty()) {
+        return true;
+      }
+      if (loop.getOps<AsyncCopyGlobalToLocalOp>().empty()) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
+void multiBufferAref(const SmallVector<ArefCreateOp> &arefOps, int numStages) {
   SmallVector<Operation *> allocsToErase;
   for (auto arefOp : arefOps) {
     SmallVector<Value> allocOps;
@@ -874,7 +887,6 @@ public:
       if (loop->hasAttr(triton::kWarpSpecializeAttrName))
         loops.push_back(loop);
     });
-
     for (scf::ForOp loop : loops) {
       combineArefs(loop);
     }
@@ -887,7 +899,15 @@ public:
     }
     LLVM_DEBUG(llvm::dbgs() << "After arefIndexAssignment\n" << m << "\n");
 
-    multiBufferAref(m, numStages);
+    SmallVector<ArefCreateOp> arefOps;
+    m.walk([&](ArefCreateOp arefOp) {
+      // Only handles arefs whose producer (a partition with PutEnter / Exit)
+      // does load from global to shared memory.
+      if (isProducerLoad(arefOp)) {
+        arefOps.push_back(arefOp);
+      }
+    });
+    multiBufferAref(arefOps, numStages);
 
     mlir::RewritePatternSet patterns(context);
     patterns.add<LowerArefCreate>(context);
