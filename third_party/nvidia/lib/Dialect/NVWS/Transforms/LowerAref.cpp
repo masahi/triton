@@ -24,9 +24,6 @@
 #include "Utilities.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/IR/AttrTypeSubElements.h"
-#include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/IR/Location.h"
@@ -228,7 +225,7 @@ SmallVector<Value> getSubViews(ArefValue arefVal, Value stage, Location loc,
   return views;
 }
 
-void createTMALoad(triton::nvws::DescriptorLoadOp op, OpBuilder &rewriter,
+void createTMALoad(triton::nvws::DescriptorLoadOp op, PatternRewriter &rewriter,
                    Value barrierAlloc, Value pred) {
   auto indices = translateTMAIndices(
       rewriter, op.getLoc(),
@@ -240,8 +237,9 @@ void createTMALoad(triton::nvws::DescriptorLoadOp op, OpBuilder &rewriter,
   assignStageCluster(newLoadOp, getStageCluster(op), rewriter);
 };
 
-void createTMAGather(triton::nvws::DescriptorGatherOp op, OpBuilder &rewriter,
-                     Value barrierAlloc, Value pred) {
+void createTMAGather(triton::nvws::DescriptorGatherOp op,
+                     PatternRewriter &rewriter, Value barrierAlloc,
+                     Value pred) {
   auto newGatherOp = rewriter.create<triton::nvidia_gpu::AsyncTMAGatherOp>(
       op.getLoc(), op.getDesc(), op.getXOffsets(), op.getYOffset(),
       barrierAlloc, op.getResult(), pred);
@@ -676,27 +674,8 @@ void multiBufferAref(ModuleOp mod, int numStages) {
   SmallVector<ArefCreateOp> arefOps;
   mod.walk([&](ArefCreateOp arefOp) { arefOps.push_back(arefOp); });
 
-  auto getParentBlock = [](ArefPutEnterOp op) -> Block * {
-    auto block = op->getBlock();
-    while (block && block->getParentOp() &&
-           !isa<WarpGroupOp>(block->getParentOp()))
-      block = block->getParentOp()->getBlock();
-    assert(block);
-    assert(block->getParentOp());
-    return block;
-  };
-
   SmallVector<Operation *> allocsToErase;
   for (auto arefOp : arefOps) {
-    DenseSet<Block *> producerPartitions;
-    for (auto user : arefOp->getUsers()) {
-      if (auto putEnterOp = dyn_cast<ArefPutEnterOp>(user))
-        producerPartitions.insert(getParentBlock(putEnterOp));
-    }
-    // if used in multiple producer partitions, do not update aref depth
-    if (producerPartitions.size() != 1)
-      continue;
-
     SmallVector<Value> allocOps;
     SmallVector<Type> arefTypes;
 
@@ -714,8 +693,10 @@ void multiBufferAref(ModuleOp mod, int numStages) {
       arefTypes.push_back(arefBufType);
       allocsToErase.push_back(oldAlloc);
     }
+
     auto newAref =
         createArefCreateOp(builder, arefTypes, allocOps, arefOp.getLoc());
+
     arefOp.getResult().replaceAllUsesWith(newAref.getResult());
     arefOp.erase();
   }
@@ -729,12 +710,12 @@ template <typename EnterOp, typename ExitOp>
 ExitOp createCombinedArefOps(SmallVector<EnterOp> &enterOps,
                              SmallVector<ExitOp> &exitOps, ArefCreateOp aref,
                              OpBuilder &builder) {
-  auto firstEnter = *llvm::min_element(enterOps, [](auto a, auto b) {
+  auto firstEnter = *llvm::min_element(enterOps, [](EnterOp a, EnterOp b) {
     assert(a->getBlock() == b->getBlock());
     return a->isBeforeInBlock(b);
   });
 
-  auto lastExit = *llvm::max_element(exitOps, [](auto a, auto b) {
+  auto lastExit = *llvm::max_element(exitOps, [](ExitOp a, ExitOp b) {
     assert(a->getBlock() == b->getBlock());
     return a->isBeforeInBlock(b);
   });
@@ -745,12 +726,8 @@ ExitOp createCombinedArefOps(SmallVector<EnterOp> &enterOps,
   }
 
   llvm::SmallSetVector<Attribute, 5> opAttrsSet;
-  for (Operation *exitOp : exitOps) {
-    if (auto putExit = dyn_cast<ArefPutExitOp>(exitOp)) {
-      opAttrsSet.insert(putExit.getAsyncOps()[0]);
-    } else if (auto getExit = dyn_cast<ArefGetExitOp>(exitOp)) {
-      opAttrsSet.insert(getExit.getAsyncOps()[0]);
-    }
+  for (ExitOp exitOp : exitOps) {
+    opAttrsSet.insert(exitOp.getAsyncOps().begin(), exitOp.getAsyncOps().end());
   }
 
   builder.setInsertionPointAfter(aref);
@@ -786,30 +763,23 @@ void findSharedMemorySinkOps(Value value,
       sinkOps.push_back(user);
     } else if (user->hasTrait<OpTrait::MemDescViewTrait>()) {
       findSharedMemorySinkOps(user->getResult(0), sinkOps);
-    } else {
-      mlir::emitWarning(user->getLoc(),
-                        "failed to warp specialize: cannot handle sink "
-                        "of in-memory load operation");
     }
   }
 }
 
 Operation *getDominantConsumer(ArefGetEnterOp getEnterOp, Block &container,
                                DominanceInfo &domInfo) {
-  SmallVector<Operation *> shmemSinks;
   assert(getEnterOp->getNumResults() && "Expect a single-result ArefGenterOp");
   auto buf = getEnterOp->getResult(0);
   SmallVector<Operation *> sinkOps;
   findSharedMemorySinkOps(buf, sinkOps);
 
-  for (Operation *sinkOp : sinkOps) {
-    shmemSinks.push_back(sinkOp);
-  }
-
-  Operation *liveBeforeOp = findNearestCommonDominator(shmemSinks, domInfo);
+  Operation *liveBeforeOp = findNearestCommonDominator(sinkOps, domInfo);
   return container.findAncestorOpInBlock(*liveBeforeOp);
 }
 
+// This is an optimization to combine arefs for TMA load into one, so that
+// barrier arrive and wait are coalesced.
 void combineArefs(scf::ForOp loop) {
   SmallVector<ArefGetEnterOp> getEnterOps;
   loop.walk([&](ArefGetEnterOp op) { getEnterOps.push_back(op); });
@@ -856,7 +826,6 @@ void combineArefs(scf::ForOp loop) {
       }
     }
 
-    // set insertion point at the last aref_create
     SmallVector<Type> arefBufTypes;
     SmallVector<Value> arefBufs;
     for (auto aref : arefs) {
@@ -864,6 +833,7 @@ void combineArefs(scf::ForOp loop) {
       arefBufs.push_back(aref.getOperands()[0]);
     }
 
+    // set insertion point at the last aref_create
     auto lastAref = *llvm::max_element(arefs, [](auto a, auto b) {
       assert(a->getBlock() == b->getBlock());
       return a->isBeforeInBlock(b);
@@ -900,7 +870,7 @@ public:
     mlir::ModuleOp m = getOperation();
 
     SmallVector<scf::ForOp> loops;
-    getOperation().walk([&](scf::ForOp loop) {
+    m.walk([&](scf::ForOp loop) {
       if (loop->hasAttr(triton::kWarpSpecializeAttrName))
         loops.push_back(loop);
     });
