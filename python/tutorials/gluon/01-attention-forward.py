@@ -94,7 +94,6 @@ def Channel(T, alloc_fn):
             for i in gl.static_range(num_buffers):
                 mbarrier.init(ready_bars.index(i), count=1)
                 mbarrier.init(empty_bars.index(i), count=num_consumers)
-                mbarrier.arrive(empty_bars.index(i), count=num_consumers)
             return ChannelType(mem, ready_bars, empty_bars, num_buffers, num_consumers)
 
         @gluon.jit
@@ -118,16 +117,16 @@ def Channel(T, alloc_fn):
             return mem, empty_bar
 
         @gluon.jit
-        def create_counter(self):
-            return BarrierCounter(gl.to_tensor(0), gl.to_tensor(0), self.num_buffers)
+        def create_counter(self, phase_init: gl.constexpr):
+            return BarrierCounter(gl.to_tensor(0), gl.to_tensor(phase_init), self.num_buffers)
 
         @gluon.jit
         def create_producer(self):
-            return Producer(self, self.create_counter())
+            return Producer(self, self.create_counter(1))
 
         @gluon.jit
         def create_consumer(self):
-            return Consumer(self, self.create_counter())
+            return Consumer(self, self.create_counter(0))
 
         @gluon.jit
         def release(self):
