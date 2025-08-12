@@ -846,27 +846,27 @@ LogicalResult lowerLoops(scf::ForOp &loop, MutableArrayRef<PipelinedLoad> loads,
   DominanceInfo domInfo(loop);
   PostDominanceInfo postDomInfo(loop);
 
-  // Group loads by common first user operations. This ensures, for example,
-  // that multiple loads feeding into the same MMA op are placed together.
-  llvm::MapVector<ArrayRef<Operation *>, SmallVector<PipelinedLoad>>
-      liveBeforeGroups;
-  for (PipelinedLoad &load : loads) {
-    if (failed(load.determineLiveRange(body, domInfo, postDomInfo, schedule)))
-      return failure();
-    liveBeforeGroups[load.liveBeforeOps].push_back(std::move(load));
-  }
-  SmallVector<PipelinedLoadGroup> loadGroups;
-  for (auto &loads : llvm::make_second_range(liveBeforeGroups))
-    loadGroups.push_back({std::move(loads)});
+  // // Group loads by common first user operations. This ensures, for example,
+  // // that multiple loads feeding into the same MMA op are placed together.
+  // llvm::MapVector<ArrayRef<Operation *>, SmallVector<PipelinedLoad>>
+  //     liveBeforeGroups;
+  // for (PipelinedLoad &load : loads) {
+  //   if (failed(load.determineLiveRange(body, domInfo, postDomInfo, schedule)))
+  //     return failure();
+  //   liveBeforeGroups[load.liveBeforeOps].push_back(std::move(load));
+  // }
+  // SmallVector<PipelinedLoadGroup> loadGroups;
+  // for (auto &loads : llvm::make_second_range(liveBeforeGroups))
+  //   loadGroups.push_back({std::move(loads)});
 
-  // Multi-buffer and lower the loads.
-  for (PipelinedLoadGroup &group : loadGroups)
-    group.allocateAref(loop, numLoadStages);
+  // // Multi-buffer and lower the loads.
+  // for (PipelinedLoadGroup &group : loadGroups)
+  //   group.allocateAref(loop, numLoadStages);
 
-  for (PipelinedLoadGroup &group : loadGroups) {
-    if (failed(group.lowerLoads(schedule, domInfo, postDomInfo)))
-      return failure();
-  }
+  // for (PipelinedLoadGroup &group : loadGroups) {
+  //   if (failed(group.lowerLoads(schedule, domInfo, postDomInfo)))
+  //     return failure();
+  // }
 
   // Multi-buffer and lower the MMAs.
   for (PipelinedMMA &mma : mmas) {
