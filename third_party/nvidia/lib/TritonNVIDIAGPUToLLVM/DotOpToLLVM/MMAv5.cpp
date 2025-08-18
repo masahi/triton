@@ -694,17 +694,27 @@ void convertScaledDot(const LLVMTypeConverter &typeConverter,
 
 SmallVector<ttng::TCGen5CommitOp>
 collectCommitOpAfter(ttng::MMAv5OpInterface mmaOp) {
+  auto isConstTrue = [](Value v) {
+    if (auto constOp = v.getDefiningOp<arith::ConstantOp>()) {
+      if (auto attr = dyn_cast<BoolAttr>(constOp.getValueAttr())) {
+        return attr.getValue();
+      }
+    }
+    return false;
+  };
+  auto equalPred = [=](Value pred1, Value pred2) {
+    // Keep it simple for now. TODO: Check structural equality?
+    return isConstTrue(pred1) && isConstTrue(pred2);
+  };
+
   SmallVector<ttng::TCGen5CommitOp> commitOps;
   Operation *nextOp = mmaOp->getNextNode();
   auto mmaPred = mmaOp.getPredicate();
-  auto equalPred = [](Value pred1, Value pred2) {
-    // TODO
-    return true;
-  };
+
   while (nextOp && !isa<nvidia_gpu::MMAv5OpInterface>(nextOp)) {
     if (auto commit = dyn_cast<ttng::TCGen5CommitOp>(nextOp)) {
       if (equalPred(mmaPred, commit.getPred())) {
-	commitOps.push_back(commit);
+        commitOps.push_back(commit);
       }
     }
     nextOp = nextOp->getNextNode();
