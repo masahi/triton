@@ -490,9 +490,6 @@ void convertDotImpl(const LLVMTypeConverter &typeConverter,
   }
 
   for (auto commitOp : commitOps) {
-    Value commitPred = elect;
-    Value barrier = rewriter.getRemappedValue(commitOp.getBarrier());
-
     // Collect operations that need to be moved
     SmallVector<Operation *> toMove;
     std::function<void(Value)> collectOpsToMove = [&](Value val) {
@@ -508,6 +505,9 @@ void convertDotImpl(const LLVMTypeConverter &typeConverter,
       }
     };
 
+    Value barrier = rewriter.getRemappedValue(commitOp.getBarrier());
+    assert(barrier &&
+           "The barrier operand of TCGen5CommitOp has not been remapped");
     collectOpsToMove(barrier);
 
     // Move operations to current insertion point
@@ -518,7 +518,8 @@ void convertDotImpl(const LLVMTypeConverter &typeConverter,
 
     auto smemObj =
       LLVM::getSharedMemoryObjectFromStruct(loc, barrier, i64_ty, rewriter);
-    createMMACommit(rewriter, loc, smemObj.getBase(), commitPred, twoCTAs);
+
+    createMMACommit(rewriter, loc, smemObj.getBase(), elect, twoCTAs);
   }
 
   rewriter.create<LLVM::BrOp>(loc, endBlock);
