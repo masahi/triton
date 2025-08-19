@@ -114,6 +114,16 @@ struct ConvertTritonGPUToLLVM
     mlir::triton::NVIDIA::populateTMAToLLVMPatterns(typeConverter, targetInfo,
                                                     patterns, benefit);
     populateDotOpToLLVMPatterns(typeConverter, patterns, benefit);
+
+    mod.walk([](Operation* op) {
+      if (auto fadd = dyn_cast<arith::AddFOp>(op)) {
+        fadd.setFastmath(arith::FastMathFlags::contract);
+      } else if (auto fsub = dyn_cast<arith::SubFOp>(op)) {
+        fsub.setFastmath(arith::FastMathFlags::contract);
+      } else if (auto fmul = dyn_cast<arith::MulFOp>(op)) {
+        fmul.setFastmath(arith::FastMathFlags::contract);
+      }
+    });
     populateElementwiseOpToLLVMPatterns(typeConverter, patterns,
                                         axisInfoAnalysis, computeCapability,
                                         targetInfo, benefit);

@@ -1,8 +1,11 @@
 #ifndef TRITON_CONVERSION_TRITONGPU_TO_ELEMENTWISE_OP_H
 #define TRITON_CONVERSION_TRITONGPU_TO_ELEMENTWISE_OP_H
-
+#include <type_traits>
+#include "mlir/Conversion/ArithCommon/AttrToLLVMConverter.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/IR/Attributes.h"
 #include "mlir/Support/LLVM.h"
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
@@ -224,8 +227,26 @@ struct ElementwiseOpConversion
                                     ConversionPatternRewriter &rewriter,
                                     Type elemTy, MultipleOperandsRange operands,
                                     Location loc) const {
-    return {rewriter.create<DestOp>(loc, elemTy, operands[0],
-                                    adaptor.getAttributes().getValue())};
+    // llvm::errs() << "source op\n";
+    // op.dump();
+    ArrayRef<NamedAttribute> newAttrs;
+    if constexpr (std::is_same<arith::MulFOp, SourceOp>::value) {
+      auto attrConv = arith::AttrConvertFastMathToLLVM<arith::MulFOp, LLVM::FMulOp>(op);
+      newAttrs = attrConv.getAttrs();
+    } else if constexpr (std::is_same<arith::AddFOp, SourceOp>::value) {
+      auto attrConv = arith::AttrConvertFastMathToLLVM<arith::AddFOp, LLVM::FAddOp>(op);
+      newAttrs = attrConv.getAttrs();
+    } else if constexpr (std::is_same<arith::SubFOp, SourceOp>::value) {
+      auto attrConv = arith::AttrConvertFastMathToLLVM<arith::SubFOp, LLVM::FSubOp>(op);
+      newAttrs = attrConv.getAttrs();
+    } else {
+      newAttrs = adaptor.getAttributes().getValue();
+    }
+
+    auto newOp =  rewriter.create<DestOp>(loc, elemTy, operands[0], newAttrs);
+    // llvm::errs() << "dst op\n";
+    // newOp.dump();
+    return {newOp};
   }
 };
 
