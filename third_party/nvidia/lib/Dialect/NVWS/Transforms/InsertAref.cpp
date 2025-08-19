@@ -95,11 +95,10 @@ ArefCreateOp createAref(OpBuilder &builder, ProducedValueInfo &producedValue) {
   };
 
   MemDescType memDescType;
-  if (isDescLoadAndAlloc<LocalAllocOp>(result)) {
+  if (result.getDefiningOp<LocalAllocOp>()) {
     memDescType = dyn_cast<MemDescType>(result.getType());
   } else if (auto opt = isDescLoadAndAlloc<TMEMAllocOp>(result)) {
     auto descLoadResult = opt->first.getSrc();
-    memDescType = getSmemDescType(descLoadResult);
   } else if (isa<RankedTensorType>(result.getType())) {
     memDescType = getSmemDescType(result);
   } else {
@@ -206,6 +205,10 @@ SmallVector<Operation *> createArefPut(PartitionBuilder &builder,
   } else if (isGlobalLoadAndAlloc<LocalAllocOp>(result) ||
              isGlobalLoadAndAlloc<TMEMAllocOp>(result)) {
     llvm_unreachable("cpasync not supported yet");
+  } else if (auto alloc = result.getDefiningOp<LocalAllocOp>()) {
+    builder.createInto<LocalStoreOp>(*producerPartition, stageCluster,
+                                     alloc.getSrc(), dataBuf);
+    staleOps.push_back(alloc);
   } else if (auto tensorType = dyn_cast<RankedTensorType>(result.getType())) {
     if (auto descOp = result.getDefiningOp<triton::DescriptorOpInterface>()) {
       createNVWSDescriptorLoadOp(builder, descOp, dataBuf, producerPartition,
@@ -483,6 +486,8 @@ public:
               isDescLoadAndAlloc<TMEMAllocOp>(op->getResult(0)) ||
               (allowDescLoadRegUse &&
                (isa<triton::DescriptorOpInterface>(op)))) {
+            ops.push_back(op);
+          } else if (isa<LocalAllocOp>(op)) {
             ops.push_back(op);
           }
           return WalkResult::advance();
