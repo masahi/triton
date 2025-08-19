@@ -292,8 +292,7 @@ void rewritePutEnterOp(ArefPutEnterOp op, PatternRewriter &rewriter,
   auto hasTMA = [](AsyncOp kind) { return kind == AsyncOp::TMALoad; };
 
   if (llvm::any_of(asyncKinds, hasTMA)) {
-    Value fullBarrier =
-        getFullBarrier(rewriter, loc, arefVal, op.getStage());
+    Value fullBarrier = getFullBarrier(rewriter, loc, arefVal, op.getStage());
     lowerTMALoad(op, fullBarrier, rewriter, arefVal);
   }
 
@@ -875,26 +874,26 @@ void combineArefs(scf::ForOp loop) {
       arefs.push_back(cast<ArefCreateOp>(getEnterOp.getAref().getDefiningOp()));
     }
 
-    arefsToFuse.push_back(arefs);
-  }
-
-  for (auto arefs : arefsToFuse) {
     SmallVector<ArefPutEnterOp> putEnterOps;
     SmallVector<ArefPutExitOp> putExitOps;
-    SmallVector<ArefGetEnterOp> getEnterOps;
     SmallVector<ArefGetExitOp> getExitOps;
+    SmallVector<int> producerGroupIds;
     for (auto aref : arefs) {
       for (auto user : aref->getUsers()) {
         if (auto putEnterOp = dyn_cast<ArefPutEnterOp>(user)) {
           putEnterOps.push_back(putEnterOp);
+          producerGroupIds.push_back(getWarpGroupIdx(putEnterOp).second);
         } else if (auto putExitOp = dyn_cast<ArefPutExitOp>(user)) {
           putExitOps.push_back(putExitOp);
-        } else if (auto getEnterOp = dyn_cast<ArefGetEnterOp>(user)) {
-          getEnterOps.push_back(getEnterOp);
         } else if (auto getExitOp = dyn_cast<ArefGetExitOp>(user)) {
           getExitOps.push_back(getExitOp);
         }
       }
+    }
+
+    if (!llvm::all_of(producerGroupIds,
+                      [&](int id) { return id == producerGroupIds[0]; })) {
+      continue;
     }
 
     SmallVector<Type> arefBufTypes;
