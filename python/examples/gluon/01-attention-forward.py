@@ -76,26 +76,24 @@ def Channel(T, alloc_fn):
         ready_bars: gl.shared_memory_descriptor
         empty_bars: gl.shared_memory_descriptor
         num_buffers: gl.constexpr
-        num_consumers: gl.constexpr
 
-        def __init__(self, mem, ready_bars, empty_bars, num_buffers, num_consumers):
+        def __init__(self, mem, ready_bars, empty_bars, num_buffers):
             self.mem = mem
             self.ready_bars = ready_bars
             self.empty_bars = empty_bars
             self.num_buffers = gl.constexpr(num_buffers)
-            self.num_consumers = gl.constexpr(num_consumers)
 
         @gluon.jit
         def alloc(shape: gl.constexpr, dtype: gl.constexpr, layout: gl.constexpr, num_buffers: gl.constexpr,
-                  num_consumers: gl.constexpr = 1):
+                  producer_arrival_count: gl.constexpr, consumer_arrival_count: gl.constexpr):
             mem = alloc_fn(dtype, [num_buffers] + shape, layout)
             ready_bars = gl.allocate_shared_memory(gl.int64, [num_buffers, 1], mbarrier.MBarrierLayout())
             empty_bars = gl.allocate_shared_memory(gl.int64, [num_buffers, 1], mbarrier.MBarrierLayout())
             for i in gl.static_range(num_buffers):
-                mbarrier.init(ready_bars.index(i), count=1)
-                mbarrier.init(empty_bars.index(i), count=num_consumers)
+                mbarrier.init(ready_bars.index(i), count=producer_arrival_count)
+                mbarrier.init(empty_bars.index(i), count=consumer_arrival_count)
                 mbarrier.arrive(empty_bars.index(i), count=num_consumers)
-            return ChannelType(mem, ready_bars, empty_bars, num_buffers, num_consumers)
+            return ChannelType(mem, ready_bars, empty_bars, num_buffers)
 
         @gluon.jit
         def acquire_producer(self, counter):
@@ -177,10 +175,10 @@ TensorMemoryChannel, TensorMemoryProducer, TensorMemoryConsumer = Channel(tensor
 
 
 @gluon.jit
-def get_desc_channel(desc, num_buffers: gl.constexpr, num_consumers: gl.constexpr = 1):
+def get_desc_channel(desc, num_buffers: gl.constexpr):
     shape: gl.constexpr = desc.block_type.shape
     layout: gl.constexpr = desc.layout
-    return SharedMemoryChannel.alloc(shape, desc.dtype, layout, num_buffers, num_consumers)
+    return SharedMemoryChannel.alloc(shape, desc.dtype, layout, num_buffers, 1, 1)
 
 
 @gluon.jit
