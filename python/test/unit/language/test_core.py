@@ -1576,7 +1576,7 @@ def test_atomic_rmw(op, dtype_x_str, mode, sem, device):
     # atom.add.bf16 is unsupported prior to Hopper so instead we generate an
     # atom.cas add loop on Ampere and prior
     if dst_type == 'bfloat16' and torch.cuda.get_device_capability()[0] < 9:
-        assert f"atom.{sem_str}.global.cas" in h.asm["ptx"]
+        assert f"atom.{sem_str}.gpu.global.cas" in h.asm["ptx"]
         return
 
     assert f"atom.global.gpu.{sem_str}" in h.asm["ptx"]
@@ -6450,7 +6450,7 @@ def test_split_subview(M, N, M_tile_size, N_tile_size, device, tmp_path: pathlib
         %c0_i32 = arith.constant 0 : i32
 
         %12 = ttg.local_alloc : () -> !ttg.memdesc<1x{M}x{N}xf16, #shared, #smem, mutable>
-        %13 = ttg.memdesc_index %12, %c0_i32 : !ttg.memdesc<1x{M}x{N}xf16, #shared, #smem, mutable> -> !ttg.memdesc<{M}x{N}xf16, #shared, #smem, mutable>
+        %13 = ttg.memdesc_index %12[%c0_i32] : !ttg.memdesc<1x{M}x{N}xf16, #shared, #smem, mutable> -> !ttg.memdesc<{M}x{N}xf16, #shared, #smem, mutable>
         ttg.local_store %11, %13 : tensor<{M}x{N}xf16, #blocked> -> !ttg.memdesc<{M}x{N}xf16, #shared, #smem, mutable>
 
     """
