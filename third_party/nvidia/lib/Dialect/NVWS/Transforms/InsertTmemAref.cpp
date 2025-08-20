@@ -425,7 +425,7 @@ struct TMEMAref {
 TmemAccessDag::Node *
 insertTmemArefImpl(TmemAccessDag::Node *node,
                    std::optional<PartitionId> curPartitionId, TMEMAref &state) {
-  if (node->partitionId != curPartitionId) {
+  if (curPartitionId && node->partitionId != curPartitionId) {
     OpBuilder b(node->op);
     Operation *prevOp = nullptr;
     std::optional<PartitionId> prevPartitionId;
@@ -449,14 +449,13 @@ insertTmemArefImpl(TmemAccessDag::Node *node,
 
     // acquire right before op that acquires ownership of tmem
     auto curOp = node->op;
+    auto partitionId = node->partitionId;
     b.setInsertionPoint(curOp);
 
-    auto partitionId = node->partitionId;
     if (isa<scf::YieldOp>(curOp)) {
       // in yieldOp we overload parentDag as the first op in the current subDag
       // so we use its partition and stageCluster to insert acquire
       curOp = node->parentDag->op;
-      partitionId = node->parentDag->partitionId;
     }
     auto stageCluster = getStageCluster(curOp);
     state.acquire(b, curOp->getLoc(), {partitionId, stageCluster});
@@ -581,7 +580,7 @@ LogicalResult insertTmemAref(TmemAccessDag &accessDag) {
                             src, boolCst(b, allocOp.getLoc(), true));
   } else {
     // allocOp w/o src, assume the ownership of tmem belongs to first user
-    partitionId = accessDag.getRootNode()->user->partitionId;
+    //    partitionId = accessDag.getRootNode()->user->partitionId;
   }
 
   auto node = insertTmemArefImpl(rootNode->user.get(), partitionId, state);

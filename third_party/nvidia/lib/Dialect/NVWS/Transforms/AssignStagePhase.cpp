@@ -181,8 +181,8 @@ template <class T> struct ArefThreadIndex {
       arefTokenRefs[*pos] = &index.token;
     }
 
-    tokToStagePosMap[thenIndex.token] = nArgs + thenYieldOp.getNumOperands();
-    tokToStagePosMap[elseIndex.token] = nArgs + elseYieldOp.getNumOperands();
+    tokToStagePosMap[thenIndex.token] = thenYieldOp.getNumOperands();
+    tokToStagePosMap[elseIndex.token] = elseYieldOp.getNumOperands();
     thenYieldOp->insertOperands(thenYieldOp.getNumOperands(), thenIndex.stage);
     elseYieldOp->insertOperands(elseYieldOp.getNumOperands(), elseIndex.stage);
     if (thenIndex.phase) {
