@@ -43,7 +43,7 @@ void AutomaticWarpSpecialization::runOnOperation() {
   // FIXME: Re-enable integer range analysis once it is fixed.
   // pm.addPass(arith::createIntRangeOptimizationsPass());
   // pm.addPass(createNVWSAssignStagePhase());
-  pm.addPass(createNVWSLowerAref());
+  pm.addPass(createNVWSLowerAref({numStages}));
   pm.addPass(createSCCPPass());
   pm.addPass(createCSEPass());
   pm.addPass(createTritonGPUPartitionLoops());
