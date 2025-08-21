@@ -1,8 +1,10 @@
 #include "triton/Dialect/TritonGPU/Transforms/Partition.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "llvm/ADT/SCCIterator.h"
 #include "llvm/IR/Use.h"
+#include "llvm/Support/Casting.h"
 
 using namespace mlir;
 using namespace triton;
@@ -118,6 +120,38 @@ bool WarpSchedule::trySchedule(Partition *partition, Operation *op) {
   return true;
 }
 
+void assignPartitionToBlock(mlir::Block *block, Partition *part,
+                            ArrayRef<std::unique_ptr<Partition>> partitions,
+                            DenseMap<Operation *, Partition *> &opToPartition);
+
+void assignPartitionToIfOp(scf::IfOp ifOp, Partition *part,
+                           ArrayRef<std::unique_ptr<Partition>> partitions,
+                           DenseMap<Operation *, Partition *> &opToPartition) {
+  assignPartitionToBlock(ifOp.thenBlock(), part, partitions, opToPartition);
+  if (ifOp.elseBlock()) {
+    assignPartitionToBlock(ifOp.elseBlock(), part, partitions, opToPartition);
+  }
+}
+
+void assignPartitionToBlock(mlir::Block *block, Partition *parentPartition,
+                            ArrayRef<std::unique_ptr<Partition>> partitions,
+                            DenseMap<Operation *, Partition *> &opToPartition) {
+  for (auto &op : block->getOperations()) {
+    Partition *part;
+    if (auto attr = op.getAttrOfType<IntegerAttr>(kPartitionAttrName)) {
+      int64_t idx = attr.getInt();
+      part = partitions[idx].get();
+    } else {
+      part = parentPartition;
+    }
+
+    opToPartition[&op] = part;
+    if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+      assignPartitionToIfOp(ifOp, parentPartition, partitions, opToPartition);
+    }
+  }
+}
+
 FailureOr<WarpSchedule> WarpSchedule::deserialize(scf::ForOp loop) {
   auto stages = loop->getAttrOfType<ArrayAttr>(kPartitionStagesAttrName);
   if (!stages)
@@ -149,22 +183,39 @@ FailureOr<WarpSchedule> WarpSchedule::deserialize(scf::ForOp loop) {
       partition = result.partitions[idx].get();
     }
     result.insert(partition, &op);
+
+    if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+      assignPartitionToIfOp(ifOp, partition, result.partitions,
+                            result.opToPartition);
+    }
   }
 
   return result;
 }
 
-void WarpSchedule::serialize(scf::ForOp loop) const {
-  SmallVector<Attribute> stages;
-  Builder b(loop.getContext());
-  for (Operation &op : loop.getBody()->without_terminator()) {
-    if (Partition *partition = opToPartition.lookup(&op)) {
+void WarpSchedule::serializeBlock(Block *block, Builder &b) const {
+  for (Operation &op : block->without_terminator()) {
+    if (auto forOp = dyn_cast<scf::ForOp>(op)) {
+      serializeBlock(forOp.getBody(), b);
+    } else if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+      serializeBlock(ifOp.thenBlock(), b);
+      if (ifOp.elseBlock()) {
+        serializeBlock(ifOp.elseBlock(), b);
+      }
+    } else if (Partition *partition = opToPartition.lookup(&op)) {
       if (partition == getRootPartition())
         continue;
       op.setAttr(kPartitionAttrName,
                  b.getI32IntegerAttr(partition->getIndex()));
     }
   }
+}
+
+void WarpSchedule::serialize(scf::ForOp loop) const {
+  SmallVector<Attribute> stages;
+  Builder b(loop.getContext());
+  serializeBlock(loop.getBody(), b);
+
   for (Partition &partition : getPartitions())
     stages.push_back(b.getI32IntegerAttr(partition.getStage()));
   loop->setAttr(kPartitionStagesAttrName, b.getArrayAttr(stages));
@@ -233,7 +284,8 @@ void WarpSchedule::iterateOutputs(
     function_ref<void(Operation *, OpOperand &)> callback) const {
   for (Operation *op : partition->getOps()) {
     for (OpOperand &use : op->getUses()) {
-      Operation *owner = loop.getBody()->findAncestorOpInBlock(*use.getOwner());
+      //      Operation *owner = loop.getBody()->findAncestorOpInBlock(*use.getOwner());
+      Operation *owner = use.getOwner();
       if (isa<scf::YieldOp>(owner)) {
         // This value is used in a subsequent iteration.
         callback(owner, use);

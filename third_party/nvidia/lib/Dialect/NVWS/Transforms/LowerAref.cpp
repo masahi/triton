@@ -198,7 +198,9 @@ ArefValue createAndInitMbar(ArefCreateOp op, PatternRewriter &rewriter) {
 }
 
 SmallVector<Value> getSubViews(ArefValue arefVal, Value stage, Location loc,
-                               OpBuilder &rewriter) {
+                               OpBuilder &rewriter,
+                               std::optional<PartitionId> partitionId,
+                               StageCluster stageCluster) {
   SmallVector<Value> views;
   for (auto buffer : arefVal.buffers) {
     auto memDescType = cast<MemDescType>(buffer.getType());
@@ -209,8 +211,10 @@ SmallVector<Value> getSubViews(ArefValue arefVal, Value stage, Location loc,
     auto memDescTypeNew = MemDescType::get(
         tensorShape, memDescType.getElementType(), memDescType.getEncoding(),
         memDescType.getMemorySpace(), true);
-    Value singleBuffer =
+    // TODO partition
+    auto singleBuffer =
         rewriter.create<MemDescIndexOp>(loc, memDescTypeNew, buffer, stage);
+    assignStageCluster(singleBuffer, partitionId, stageCluster, rewriter);
     views.push_back(singleBuffer);
   }
 
@@ -293,9 +297,12 @@ void rewritePutEnterOp(ArefPutEnterOp op, PatternRewriter &rewriter,
 
   // get empty barrier at a given stage
   Value emptyBarrier = getEmptyBarrier(rewriter, loc, arefVal, op.getStage());
+  assignStageCluster(emptyBarrier.getDefiningOp(), getPartitionId(op),
+                     getStageCluster(op), rewriter);
 
   insertWaitOp(rewriter, op, emptyBarrier, op.getPhase(), op.getStage());
-  auto views = getSubViews(arefVal, op.getStage(), loc, rewriter);
+  auto views = getSubViews(arefVal, op.getStage(), loc, rewriter,
+                           getPartitionId(op), getStageCluster(op));
   assert(views.size() == op.getBuffers().size());
 
   // Use the token to find the matching enter / exit pair
@@ -323,6 +330,8 @@ void rewritePutEnterOp(ArefPutEnterOp op, PatternRewriter &rewriter,
 
   if (llvm::any_of(asyncKinds, hasTMA)) {
     Value fullBarrier = getFullBarrier(rewriter, loc, arefVal, op.getStage());
+    assignStageCluster(fullBarrier.getDefiningOp(), getPartitionId(op),
+                       getStageCluster(op), rewriter);
     lowerTMALoad(op, fullBarrier, rewriter, arefVal);
   }
 
@@ -359,8 +368,12 @@ void rewriteGetEnterOp(ArefGetEnterOp op, PatternRewriter &rewriter,
   rewriter.setInsertionPointAfter(op);
 
   Value fullBarrier = getFullBarrier(rewriter, loc, arefVal, op.getStage());
+  assignStageCluster(fullBarrier.getDefiningOp(), getPartitionId(op),
+                     getStageCluster(op), rewriter);
+
   insertWaitOp(rewriter, op, fullBarrier, op.getPhase(), op.getStage());
-  auto views = getSubViews(arefVal, op.getStage(), loc, rewriter);
+  auto views = getSubViews(arefVal, op.getStage(), loc, rewriter,
+                           getPartitionId(op), getStageCluster(op));
   assert(views.size() == op.getBuffers().size());
 
   for (auto [oldBuffer, view] : llvm::zip(op.getBuffers(), views)) {
@@ -369,6 +382,17 @@ void rewriteGetEnterOp(ArefGetEnterOp op, PatternRewriter &rewriter,
     // a get enter op. After lowering, all buffers are mutable.
     propagateMutability(view);
   }
+}
+
+void rewriteArefBufferOp(ArefBufferOp op, PatternRewriter &rewriter,
+                         ArefValue arefVal) {
+  auto loc = op->getLoc();
+  rewriter.setInsertionPointAfter(op);
+  auto views = getSubViews(arefVal, op.getStage(), loc, rewriter,
+                           getPartitionId(op), getStageCluster(op));
+  assert(views.size() == op.getBuffers().size());
+  for (int i = 0; i < arefVal.buffers.size(); ++i)
+    op.getBuffers()[i].replaceAllUsesWith(views[i]);
 }
 
 void insertArriveBarrier(Location loc, ArrayRef<AsyncOp> asyncOps,
@@ -403,6 +427,8 @@ void rewritePutExitOp(ArefPutExitOp op, PatternRewriter &rewriter,
   auto loc = op->getLoc();
   rewriter.setInsertionPointAfter(op);
   Value fullBarrier = getFullBarrier(rewriter, loc, arefVal, op.getStage());
+  assignStageCluster(fullBarrier.getDefiningOp(), getPartitionId(op),
+                     getStageCluster(op), rewriter);
   insertArriveBarrier(loc, castAsyncOpAttrs(op.getAsyncOps()), rewriter,
                       fullBarrier, getPartitionId(op), getStageCluster(op));
 }
@@ -439,8 +465,10 @@ void rewriteGetExitOp(ArefGetExitOp op, PatternRewriter &rewriter,
   }
 
   Value emptyBarrier = getEmptyBarrier(rewriter, loc, arefVal, op.getStage());
-  return insertArriveBarrier(loc, asyncKinds, rewriter, emptyBarrier,
-                             getPartitionId(op), stageCluster);
+  assignStageCluster(emptyBarrier.getDefiningOp(), getPartitionId(op),
+                     stageCluster, rewriter);
+  insertArriveBarrier(loc, asyncKinds, rewriter, emptyBarrier,
+		      getPartitionId(op), stageCluster);
 }
 
 DenseSet<MMAv5OpInterface> getAsyncMMAv5Consumers(Value aref) {
