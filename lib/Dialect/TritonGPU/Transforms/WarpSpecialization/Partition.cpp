@@ -118,6 +118,38 @@ bool WarpSchedule::trySchedule(Partition *partition, Operation *op) {
   return true;
 }
 
+void assignPartitionToBlock(mlir::Block *block, Partition *part,
+                            ArrayRef<std::unique_ptr<Partition>> partitions,
+                            DenseMap<Operation *, Partition *> &opToPartition);
+
+void assignPartitionToIfOp(scf::IfOp ifOp, Partition *part,
+                           ArrayRef<std::unique_ptr<Partition>> partitions,
+                           DenseMap<Operation *, Partition *> &opToPartition) {
+  assignPartitionToBlock(ifOp.thenBlock(), part, partitions, opToPartition);
+  if (ifOp.elseBlock()) {
+    assignPartitionToBlock(ifOp.elseBlock(), part, partitions, opToPartition);
+  }
+}
+
+void assignPartitionToBlock(mlir::Block *block, Partition *parentPartition,
+                            ArrayRef<std::unique_ptr<Partition>> partitions,
+                            DenseMap<Operation *, Partition *> &opToPartition) {
+  for (auto &op : block->getOperations()) {
+    Partition *part;
+    if (auto attr = op.getAttrOfType<IntegerAttr>(kPartitionAttrName)) {
+      int64_t idx = attr.getInt();
+      part = partitions[idx].get();
+    } else {
+      part = parentPartition;
+    }
+
+    opToPartition[&op] = part;
+    if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+      assignPartitionToIfOp(ifOp, parentPartition, partitions, opToPartition);
+    }
+  }
+}
+
 FailureOr<WarpSchedule> WarpSchedule::deserialize(scf::ForOp loop) {
   auto stages = loop->getAttrOfType<ArrayAttr>(kPartitionStagesAttrName);
   if (!stages)
@@ -149,6 +181,11 @@ FailureOr<WarpSchedule> WarpSchedule::deserialize(scf::ForOp loop) {
       partition = result.partitions[idx].get();
     }
     result.insert(partition, &op);
+
+    if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+      assignPartitionToIfOp(ifOp, partition, result.partitions,
+                            result.opToPartition);
+    }
   }
 
   return result;
