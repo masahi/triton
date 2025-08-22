@@ -38,7 +38,7 @@ void AutomaticWarpSpecialization::runOnOperation() {
   pm.addPass(createTritonGPUPartitionScheduling());
   pm.addPass(createNVWSInsertTmemAref());
   pm.addPass(createNVWSInsertAref());
-  pm.addPass(createTritonGPULoadMMASpecialization({numStages}));
+  // pm.addPass(createTritonGPULoadMMASpecialization({numStages}));
   pm.addPass(createTritonGPURewritePartitionDependencies());
   // `int-range-optimizations` and SCCP are good at cleaning up loop arithmetic.
   // FIXME: Re-enable integer range analysis once it is fixed.
