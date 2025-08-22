@@ -129,7 +129,8 @@ static void scheduleUsers(scf::ForOp loop, WarpSchedule &schedule,
     uses.push_back(&use);
   while (!uses.empty()) {
     OpOperand *use = uses.pop_back_val();
-    Operation *user = loop.getBody()->findAncestorOpInBlock(*use->getOwner());
+    //    Operation *user = loop.getBody()->findAncestorOpInBlock(*use->getOwner());
+    Operation *user = use->getOwner();
 
     if (user == loop.getBody()->getTerminator()) {
       for (OpOperand &use :
