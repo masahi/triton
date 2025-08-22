@@ -14,6 +14,8 @@
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonGPU/Transforms/WarpSpecialization.h"
 #include "llvm/ADT/SCCIterator.h"
+#include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallVector.h"
 
 using namespace mlir;
 using namespace triton;
@@ -211,10 +213,33 @@ void cloneForOp(scf::ForOp forOp, SmallVector<WarpGroupBuilder> &builders,
   }
 }
 
+// WA until the partiton attribute becomes a set
+SmallVector<size_t>
+getPartitionIndicesToCloneInto(scf::IfOp ifOp, const WarpSchedule &schedule) {
+  SetVector<size_t> bodyPartitions;
+  ifOp->walk([&](Operation* op) {
+    if (auto part = schedule.getPartition(op)) {
+      if (part != schedule.getRootPartition()) {
+        bodyPartitions.insert(part->getIndex());
+      }
+    }
+  });
+
+  for (auto id: bodyPartitions) {
+    llvm::outs() << "body partition: " << id << "\n";
+  }
+
+  if (bodyPartitions.empty()) {
+    return getPartitionIndicesToCloneInto(schedule.getPartition(ifOp),
+                                          schedule);
+  }
+  return SmallVector<size_t>{bodyPartitions.begin(), bodyPartitions.end()};
+}
+
 void cloneIfOp(scf::IfOp ifOp, SmallVector<WarpGroupBuilder> &builders,
                const WarpSchedule &schedule) {
-  auto partition = getPartition(ifOp, schedule);
-  auto partitionIndices = getPartitionIndicesToCloneInto(partition, schedule);
+  llvm::outs() << "cloneIfOp\n";
+  auto partitionIndices = getPartitionIndicesToCloneInto(ifOp, schedule);
 
   SmallVector<scf::IfOp> newIfOps;
   for (size_t idx : partitionIndices) {
@@ -309,7 +334,6 @@ void cloneOpsInBlock(Block *block, SmallVector<WarpGroupBuilder> &builders,
   for (auto &op_ : *block) {
     auto op = &op_;
     auto partition = getPartition(op, schedule);
-    auto partitionIndices = getPartitionIndicesToCloneInto(partition, schedule);
 
     if (auto forOp = dyn_cast<scf::ForOp>(op)) {
       cloneForOp(forOp, builders, schedule);
@@ -322,7 +346,16 @@ void cloneOpsInBlock(Block *block, SmallVector<WarpGroupBuilder> &builders,
         continue;
       }
 
+      SmallVector<size_t> partitionIndices;
+      if (auto ifOp = dyn_cast<scf::IfOp>(yieldOp->getParentOp())) {
+        partitionIndices = getPartitionIndicesToCloneInto(ifOp, schedule);
+      } else {
+        partitionIndices = getPartitionIndicesToCloneInto(partition, schedule);
+      }
+
+      llvm::outs() << "clone yield to\n";
       for (size_t idx : partitionIndices) {
+	llvm::outs() << idx << "\n";
         auto &builder = builders[idx];
         SmallVector<size_t> newOperandIndices;
         if (auto forOp = dyn_cast<scf::ForOp>(yieldOp->getParentOp())) {
@@ -347,6 +380,7 @@ void cloneOpsInBlock(Block *block, SmallVector<WarpGroupBuilder> &builders,
         }
       }
     } else {
+      auto partitionIndices = getPartitionIndicesToCloneInto(partition, schedule);
       cloneOp(op, builders, partitionIndices);
     }
   }
@@ -411,6 +445,7 @@ LogicalResult triton::gpu::partitionLoop(scf::ForOp loop) {
     resultTypes.push_back(loop.getResultTypes()[i]);
   }
 
+  llvm::outs() << "num partitions: " << numPartitions << "\n";
   SmallVector<int32_t> numWarps(numPartitions, lookupNumWarps(loop));
   auto wgOp = topBuilder.create<nvws::WarpGroupOp>(resultTypes, numWarps,
                                                    numPartitions);
@@ -486,6 +521,8 @@ LogicalResult triton::gpu::partitionLoop(scf::ForOp loop) {
       res.replaceAllUsesWith(wgOp.getResult(*newResultIndices[i]));
     }
   }
+
+  loop->getParentOfType<ModuleOp>().dump();
 
   for (auto op : llvm::reverse(opsToErase))
     op->erase();

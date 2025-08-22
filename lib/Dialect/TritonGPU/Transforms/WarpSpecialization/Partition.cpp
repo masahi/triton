@@ -194,7 +194,7 @@ FailureOr<WarpSchedule> WarpSchedule::deserialize(scf::ForOp loop) {
 }
 
 void WarpSchedule::serializeBlock(Block *block, Builder &b) const {
-  for (Operation &op : *block) {
+  for (Operation &op : block->without_terminator()) {
     if (auto forOp = dyn_cast<scf::ForOp>(op)) {
       serializeBlock(forOp.getBody(), b);
     } else if (auto ifOp = dyn_cast<scf::IfOp>(op)) {

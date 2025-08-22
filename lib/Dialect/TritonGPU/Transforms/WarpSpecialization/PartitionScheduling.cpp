@@ -422,12 +422,13 @@ void propagatePartitions(scf::ForOp loop, WarpSchedule &schedule) {
 
     // If there are multiple def or sink partitions, don't know what to do.
     // Assign the whole cluster to its own partition.
-    if (cluster.defPartitions.size() > 1 || cluster.sinkPartitions.size() > 1) {
-      Partition *newPartition = schedule.addPartition(0);
-      for (Operation *op : cluster.ops)
-        schedule.insert(newPartition, op);
-      continue;
-    }
+    // TODO
+    // if (cluster.defPartitions.size() > 1 || cluster.sinkPartitions.size() > 1) {
+    //   Partition *newPartition = schedule.addPartition(0);
+    //   for (Operation *op : cluster.ops)
+    //     schedule.insert(newPartition, op);
+    //   continue;
+    // }
 
     // If there is no sink partition, this means there is a backedge somewhere,
     // for now assign the cluster to the def partition.
@@ -547,6 +548,7 @@ void PartitionScheduling::runOnOperation() {
       propagatePartitions(loop, *schedule);
       optimizeSchedule(loop, *schedule);
       schedule->serialize(loop);
+      llvm::outs() << "Num partitions: " << schedule->getNumPartitions() << "\n";
       loop->setAttr(
           kWarpSpecializeTagAttrName,
           IntegerAttr::get(IntegerType::get(loop.getContext(), 32), idx));
