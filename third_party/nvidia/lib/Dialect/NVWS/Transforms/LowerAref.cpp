@@ -383,6 +383,8 @@ void rewriteGetEnterOp(ArefGetEnterOp op, PatternRewriter &rewriter,
                      getStageCluster(op), rewriter);
   auto waitOp =
       insertWaitOp(rewriter, loc, fullBarrier, op.getPhase(), op.getStage());
+  assignStageCluster(waitOp, getPartitionId(op),
+                     getStageCluster(op), rewriter);
   auto views = getSubViews(arefVal, op.getStage(), loc, rewriter,
                            getPartitionId(op), getStageCluster(op));
   assert(views.size() == op.getBuffers().size());

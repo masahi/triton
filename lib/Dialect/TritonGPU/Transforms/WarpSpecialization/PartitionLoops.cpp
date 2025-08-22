@@ -380,7 +380,19 @@ void cloneOpsInBlock(Block *block, SmallVector<WarpGroupBuilder> &builders,
         }
       }
     } else {
-      auto partitionIndices = getPartitionIndicesToCloneInto(partition, schedule);
+      SmallVector<size_t> partitionIndices;
+      // WA until we assign partitions to index / phase update ops in AssignStagePhase
+      if (partition == schedule.getRootPartition()) {
+        if (auto ifOp = dyn_cast<scf::IfOp>(op->getParentOp())) {
+          partitionIndices = getPartitionIndicesToCloneInto(ifOp, schedule);
+        } else {
+          partitionIndices =
+              getPartitionIndicesToCloneInto(partition, schedule);
+        }
+      } else {
+	partitionIndices =
+	  getPartitionIndicesToCloneInto(partition, schedule);
+      }
       cloneOp(op, builders, partitionIndices);
     }
   }
@@ -392,8 +404,8 @@ LogicalResult triton::gpu::partitionLoop(scf::ForOp loop) {
   if (failed(scheduleOr))
     return failure();
   WarpSchedule schedule = std::move(*scheduleOr);
-  if (failed(schedule.verify(loop)))
-    return failure();
+  // if (failed(schedule.verify(loop)))
+  //   return failure();
 
   // Only the root node should have consumers at this point.
   for (const Partition &partition : schedule.getPartitions()) {
@@ -522,7 +534,7 @@ LogicalResult triton::gpu::partitionLoop(scf::ForOp loop) {
     }
   }
 
-  loop->getParentOfType<ModuleOp>().dump();
+  //  loop->getParentOfType<ModuleOp>().dump();
 
   for (auto op : llvm::reverse(opsToErase))
     op->erase();

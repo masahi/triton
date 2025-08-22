@@ -284,7 +284,8 @@ void WarpSchedule::iterateOutputs(
     function_ref<void(Operation *, OpOperand &)> callback) const {
   for (Operation *op : partition->getOps()) {
     for (OpOperand &use : op->getUses()) {
-      Operation *owner = loop.getBody()->findAncestorOpInBlock(*use.getOwner());
+      //      Operation *owner = loop.getBody()->findAncestorOpInBlock(*use.getOwner());
+      Operation *owner = use.getOwner();
       if (isa<scf::YieldOp>(owner)) {
         // This value is used in a subsequent iteration.
         callback(owner, use);
