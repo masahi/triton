@@ -152,6 +152,8 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     // CHECK: nvws.aref.put.exit [[AREF]][[[C0]]], [[TOK2]] [#nvws.async_op<none>]
     tt.return
   }
+
+  // CHECK-LABEL: @matmul_tma_acc_with_conditional_def
   tt.func @matmul_tma_acc_with_conditional_def(%arg0: !tt.tensordesc<tensor<128x64xf16, #shared>>, %arg1: !tt.tensordesc<tensor<64x128xf16, #shared>>) {
     %c32_i32 = arith.constant 32 : i32
     %cst = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #blocked>
