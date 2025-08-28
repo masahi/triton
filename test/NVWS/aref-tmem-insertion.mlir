@@ -275,10 +275,10 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     %c1_i32 = arith.constant 1 : i32
     %c0_i32 = arith.constant 0 : i32
     %true = arith.constant true
-    // CHECK: [[SCALESBUF:%.*]] = ttng.tmem_alloc : () -> !ttg.memdesc<128x8xi8,
-    // CHECK-NEXT: [[SCALES_AREF:%.*]] = nvws.aref.create [[SCALESBUF]]
-    // CHECK-NEXT: {{.*}}, [[SCALES_TOK:%.*]] = nvws.aref.put.enter [[SCALES_AREF]]
-    // CHECK-NEXT: [[BUF:%.*]] = nvws.aref.buffer [[SCALES_AREF]][{{.*}}], [[SCALES_TOK]]
+    // CHECK: [[LHS_SCALESBUF:%.*]] = ttng.tmem_alloc : () -> !ttg.memdesc<128x8xi8,
+    // CHECK-NEXT: [[LHS_SCALES_AREF:%.*]] = nvws.aref.create [[LHS_SCALESBUF]]
+    // CHECK-NEXT: {{.*}}, [[LHS_SCALES_TOK:%.*]] = nvws.aref.put.enter [[LHS_SCALES_AREF]]
+    // CHECK-NEXT: [[BUF:%.*]] = nvws.aref.buffer [[LHS_SCALES_AREF]][{{.*}}], [[LHS_SCALES_TOK]]
     // CHECK-NEXT: tmem_store [[CST]], [[BUF]]
     %result = ttng.tmem_alloc %cst : (tensor<128x8xi8, #linear>) -> !ttg.memdesc<128x8xi8, #tmem_scales, #ttng.tensor_memory>
 
