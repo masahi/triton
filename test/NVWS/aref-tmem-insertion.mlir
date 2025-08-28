@@ -16,13 +16,19 @@
 #tmem1 = #ttng.tensor_memory_encoding<blockM = 128, blockN = 64, unpacked = false>
 #tmem_scales = #ttng.tensor_memory_scales_encoding<>
 module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
+
+  // CHECK-LABEL: @warp_specialize_tma_matmul
   tt.func @warp_specialize_tma_matmul(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: !tt.tensordesc<tensor<128x64xf16, #shared>>, %arg4: !tt.tensordesc<tensor<128x64xf16, #shared>>) {
+
     %cst = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #blocked>
     %c64_i32 = arith.constant 64 : i32
     %c1_i32 = arith.constant 1 : i32
     %c0_i32 = arith.constant 0 : i32
     %true = arith.constant true
     %result, %token = ttng.tmem_alloc : () -> (!ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>, !ttg.async.token)
+    // CHECK: [[ABUF:%.*]] = ttng.tmem_alloc : () -> !ttng.memdesc<1x128x12xf32
+    // CHECK-NEXT: [[AREF:%.*] = nvws.aref.create [[ABUF]]
+    // CHECK-NEXT: {{*.}}, [[ATOK:.*]] = nvws.aref.put.enter [[AREF]][[[C0]], [[C0]]]
     %0 = ttng.tmem_store %cst, %result[%token], %true : tensor<128x128xf32, #blocked> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
     %1 = scf.for %arg5 = %c0_i32 to %arg0 step %c1_i32 iter_args(%arg6 = %0) -> (!ttg.async.token)  : i32 {
       %2 = arith.muli %arg5, %c64_i32 : i32
@@ -38,6 +44,7 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     "use"(%result_0) : (tensor<128x128xf32, #blocked>) -> ()
     tt.return
   }
+
   tt.func @unsupported_load() {
     %c32_i32 = arith.constant 32 : i32
     %cst = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #blocked>
