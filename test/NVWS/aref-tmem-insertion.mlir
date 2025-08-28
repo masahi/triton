@@ -45,11 +45,11 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
       %8 = ttng.tc_gen5_mma %5, %7, %result[%arg6], %true, %true {ttg.partition = 1 : i32} : !ttg.memdesc<128x64xf16, #shared, #smem>, !ttg.memdesc<64x128xf16, #shared1, #smem>, !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
       scf.yield %8 : !ttg.async.token
     } {tt.num_stages = 2 : i32, tt.warp_specialize, ttg.partition.stages = [0 : i32, 1 : i32, 0 : i32], ttg.warp_specialize.tag = 0 : i32}
-    // CHECK: nvws.aref.put.exit [[AREF]][[[C0]]], [[ATOK]]
+    // CHECK: nvws.aref.put.exit [[AREF]][[[C0]]], [[ATOK]] [#nvws.async_op<tc5mma>]
     // CHECK-NEXT: {{.*}}, [[ATOK:%.*]] = nvws.aref.get.enter [[AREF]][[[C0]], [[C0]]]
     // CHECK-NEXT: [[BUF:%.*]] = nvws.aref.buffer [[AREF]][[[C0]]], [[ATOK]]
     // CHECK-NEXT: tmem_load [[BUF]]
-    // CHECK-NEXT: nvws.aref.get.exit [[AREF]][[[C0]]], [[ATOK]]
+    // CHECK-NEXT: nvws.aref.get.exit [[AREF]][[[C0]]], [[ATOK]] [#nvws.async_op<none>]
     %result_0, %token_1 = ttng.tmem_load %result[%1] : !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable> -> tensor<128x128xf32, #blocked>
     "use"(%result_0) : (tensor<128x128xf32, #blocked>) -> ()
     tt.return
@@ -80,13 +80,25 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
       %6 = ttg.local_alloc %4 {ttg.partition = 2 : i32} : (tensor<64x128xf16, #blocked1>) -> !ttg.memdesc<64x128xf16, #shared, #smem>
       // CHECK: [[BUF:%.*]] = nvws.aref.buffer [[AREF]][[[C0]]], [[TOK]] {ttg.partition = 1 : i32}
       // CHECK-NEXT: ttng.tc_gen5_mma {{.*}}, {{.*}}, [[BUF]]
-      // CHECK-NEXT: nvws.aref.put.exit [[AREF]][[[C0]]], [[TOK]]
+      // CHECK-NEXT: nvws.aref.put.exit [[AREF]][[[C0]]], [[TOK]] [#nvws.async_op<tc5mma>] {ttg.partition = 1 : i32}
       %7 = ttng.tc_gen5_mma %5, %6, %result[%arg3], %true, %true {ttg.partition = 1 : i32} : !ttg.memdesc<128x64xf16, #shared, #smem>, !ttg.memdesc<64x128xf16, #shared, #smem>, !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
+
+      // CHECK-NEXT: {{.*}}, [[TOK:%.*]] = nvws.aref.get.enter [[AREF]][[[C0]], [[C0]]] {ttg.partition = 0 : i32}
+      // CHECK-NEXT: [[BUF:%.*]] = nvws.aref.buffer [[AREF]][[[C0]]], [[TOK]]
+      // CHECK-NEXT: tmem_load [[BUF]]
+      // CHECK-NEXT: nvws.aref.get.exit [[AREF]][[[C0]]], [[TOK]] [#nvws.async_op<none>] {ttg.partition = 0 : i32}
+      // CHECK-NEXT: "acc_user" 
+
+      // CHECK-NEXT: {{.*}}, [[TOK:%.*]] = nvws.aref.put.enter [[AREF]][[[C0]], [[C0]]] {ttg.partition = 1 : i32}
+      // CHECK-NEXT: [[BUF:%.*]] = nvws.aref.buffer [[AREF]][[[C0]]], [[TOK]]
+      // CHECK-NEXT: tmem_store {{.*}}, [[BUF]]
+      // CHECK-NEXT: yield [[TOK]]
       %result_1, %token_2 = ttng.tmem_load %result[%7] {ttg.partition = 0 : i32} : !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable> -> tensor<128x128xf32, #blocked>
       "acc_user"(%result_1) {ttg.partition = 0 : i32} : (tensor<128x128xf32, #blocked>) -> ()
       %8 = ttng.tmem_store %cst, %result[%token_2], %true {ttg.partition = 1 : i32} : tensor<128x128xf32, #blocked> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
       scf.yield %8 : !ttg.async.token
     } {tt.num_stages = 2 : i32, tt.warp_specialize, ttg.partition.stages = [0 : i32, 1 : i32, 0 : i32], ttg.warp_specialize.tag = 4 : i32}
+    // CHECK: nvws.aref.put.exit [[AREF]][[[C0]]], [[TOK1]] [#nvws.async_op<none>]
     tt.return
   }
   tt.func @matmul_tma_acc_with_conditional_user(%arg0: !tt.tensordesc<tensor<128x64xf16, #shared>>, %arg1: !tt.tensordesc<tensor<64x128xf16, #shared>>) {
