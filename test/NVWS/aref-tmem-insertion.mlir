@@ -57,6 +57,7 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
 
 // CHECK-LABEL: @matmul_tma_acc_with_unconditional_user
   tt.func @matmul_tma_acc_with_unconditional_user(%arg0: !tt.tensordesc<tensor<128x64xf16, #shared>>, %arg1: !tt.tensordesc<tensor<64x128xf16, #shared>>) {
+    // CHECK: [[C0:%.*]] = arith.constant 0 : i32
     %c32_i32 = arith.constant 32 : i32
     %cst = arith.constant dense<1.000000e+00> : tensor<128x128xf32, #blocked>
     %cst_0 = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #blocked>
@@ -67,6 +68,7 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     // CHECK-NEXT: [[AREF:%.*]] = nvws.aref.create [[ABUF]]
     // CHECK-NEXT: {{.*}}, [[ATOK:%.*]] = nvws.aref.put.enter [[AREF]][[[C0]], [[C0]]]
     // CHECK-NEXT: [[BUF:%.*]] = nvws.aref.buffer [[AREF]][[[C0]]], [[ATOK]]
+    // CHECK-NEXT: tmem_store {{.*}}, [[BUF]]
     %result, %token = ttng.tmem_alloc : () -> (!ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>, !ttg.async.token)
     %0 = ttng.tmem_store %cst_0, %result[%token], %true : tensor<128x128xf32, #blocked> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
     // CHECK: [[TOK1:%.]] = scf.for [[I:%.*]] = [[UB:%.*]] to [[LB:%.*]] step [[STEP:%.*]] iter_args([[TOK:%.*]] = [[ATOK]])
@@ -76,6 +78,9 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
       %4 = tt.descriptor_load %arg1[%2#1, %2#2] {ttg.partition = 2 : i32} : !tt.tensordesc<tensor<64x128xf16, #shared>> -> tensor<64x128xf16, #blocked1>
       %5 = ttg.local_alloc %3 {ttg.partition = 2 : i32} : (tensor<128x64xf16, #blocked1>) -> !ttg.memdesc<128x64xf16, #shared, #smem>
       %6 = ttg.local_alloc %4 {ttg.partition = 2 : i32} : (tensor<64x128xf16, #blocked1>) -> !ttg.memdesc<64x128xf16, #shared, #smem>
+      // CHECK: [[BUF:%.*]] = nvws.aref.buffer [[AREF]][[[C0]]], [[TOK]] {ttg.partition = 1 : i32}
+      // CHECK-NEXT: ttng.tc_gen5_mma {{.*}}, {{.*}}, [[BUF]]
+      // CHECK-NEXT: nvws.aref.put.exit [[AREF]][[[C0]]], [[TOK]]
       %7 = ttng.tc_gen5_mma %5, %6, %result[%arg3], %true, %true {ttg.partition = 1 : i32} : !ttg.memdesc<128x64xf16, #shared, #smem>, !ttg.memdesc<64x128xf16, #shared, #smem>, !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
       %result_1, %token_2 = ttng.tmem_load %result[%7] {ttg.partition = 0 : i32} : !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable> -> tensor<128x128xf32, #blocked>
       "acc_user"(%result_1) {ttg.partition = 0 : i32} : (tensor<128x128xf32, #blocked>) -> ()
