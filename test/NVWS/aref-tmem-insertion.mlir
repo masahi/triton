@@ -268,6 +268,7 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
   // CHECK-LABEL: @matmul_scaled_rhs_scales_tma
   tt.func @matmul_scaled_rhs_scales_tma(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: !tt.tensordesc<tensor<128x64xf8E4M3FN, #shared2>>, %arg4: !tt.tensordesc<tensor<128x64xf8E4M3FN, #shared2>>, %arg5: !tt.tensordesc<tensor<128x8xi8, #shared3>>) {
     // CHECK: [[CST:%.*]] = arith.constant dense<127> : tensor<128x8xi8
+    // CHECK: [[CST_0:%.*]] = arith.constant dense<0.000000e+00> : tensor<128x128xf32
     %cst = arith.constant dense<127> : tensor<128x8xi8, #linear>
     %cst_0 = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #blocked>
     %c64_i32 = arith.constant 64 : i32
@@ -283,6 +284,9 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
 
     // CHECK-NEXT: [[ABUF:%.*]] = ttng.tmem_alloc
     // CHECK-NEXT: [[AREF:%.*]] = nvws.aref.create [[ABUF]]
+    // CHECK-NEXT: {{.*}}, [[ATOK:%.*]] = nvws.aref.put.enter [[AREF]]
+    // CHECK-NEXT: [[BUF:%.*]] = nvws.aref.buffer [[AREF]][{{.*}}], [[ATOK]]
+    // CHECK-NEXT: tmem_store [[CST_0]], [[BUF]]
     %result_1, %token = ttng.tmem_alloc : () -> (!ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>, !ttg.async.token)
     %0 = ttng.tmem_store %cst_0, %result_1[%token], %true : tensor<128x128xf32, #blocked> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
     %1 = scf.for %arg6 = %c0_i32 to %arg0 step %c1_i32 iter_args(%arg7 = %0) -> (!ttg.async.token)  : i32 {
