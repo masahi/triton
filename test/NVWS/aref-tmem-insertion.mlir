@@ -208,24 +208,39 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
       %6 = ttg.local_alloc %4 {ttg.partition = 2 : i32} : (tensor<64x128xf16, #blocked1>) -> !ttg.memdesc<64x128xf16, #shared, #smem>
       %7 = ttng.tc_gen5_mma %5, %6, %result[%arg3], %true, %true {ttg.partition = 1 : i32} : !ttg.memdesc<128x64xf16, #shared, #smem>, !ttg.memdesc<64x128xf16, #shared, #smem>, !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
       %8 = arith.cmpi eq, %arg2, %c0_i32 : i32
+      // CHECK: [[TOK1:%.*]] = scf.if
       %9 = scf.if %8 -> (!ttg.async.token) {
+        // CHECK-NEXT: nvws.aref.put.exit [[AREF]][{{.*}}], [[TOK]]
+        // CHECK-NEXT: nvws.aref.get.enter
+        // CHECK-NEXT: nvws.aref.buffer
+        // CHECK-NEXT: tmem_load
+        // CHECK-NEXT: nvws.aref.get.exit
+        // CHECK-NEXT: acc_user
+        // CHECK-NEXT: {{.*}}, [[TOK:%.*]] = nvws.aref.put.enter [[AREF]][{{.*}}]
+        // CHECK-NEXT: yield [[TOK]]
         %result_0, %token_1 = ttng.tmem_load %result[%7] : !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable> -> tensor<128x128xf32, #blocked>
         "acc_user"(%result_0) : (tensor<128x128xf32, #blocked>) -> ()
         scf.yield %token_1 : !ttg.async.token
       } else {
         scf.yield %7 : !ttg.async.token
       } {ttg.partition = 0 : i32}
+      // CHECK: nvws.aref.buffer [[AREF]][{{.*}}], [[TOK1]]
+      // CHECK-NEXT: tmem_store
+      // CHECK-NEXT: scf.yield [[TOK1]]
       %10 = ttng.tmem_store %cst, %result[%9], %8 {ttg.partition = 1 : i32} : tensor<128x128xf32, #blocked> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
       scf.yield %10 : !ttg.async.token
     } {tt.num_stages = 2 : i32, tt.warp_specialize, ttg.partition.stages = [0 : i32, 1 : i32, 0 : i32], ttg.warp_specialize.tag = 7 : i32}
     tt.return
   }
+
+  // CHECK-LABEL: @matmul_tma_acc_with_conditional_def_and_use_no_multibuf_flag
   tt.func @matmul_tma_acc_with_conditional_def_and_use_no_multibuf_flag(%arg0: !tt.tensordesc<tensor<128x64xf16, #shared>>, %arg1: !tt.tensordesc<tensor<64x128xf16, #shared>>) {
     %c32_i32 = arith.constant 32 : i32
     %cst = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #blocked>
     %true = arith.constant true
     %c1_i32 = arith.constant 1 : i32
     %c0_i32 = arith.constant 0 : i32
+    // CHECK: ttng.tmem_alloc : () -> !ttg.memdesc<1x128x128xf32
     %result, %token = ttng.tmem_alloc : () -> (!ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>, !ttg.async.token)
     %0 = ttng.tmem_store %cst, %result[%token], %true : tensor<128x128xf32, #blocked> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
     %1:2 = scf.for %arg2 = %c0_i32 to %c32_i32 step %c1_i32 iter_args(%arg3 = %true, %arg4 = %0) -> (i1, !ttg.async.token)  : i32 {
@@ -249,6 +264,7 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     } {tt.disallow_acc_multi_buffer, tt.num_stages = 2 : i32, tt.warp_specialize, ttg.partition.stages = [0 : i32, 1 : i32, 0 : i32], ttg.warp_specialize.tag = 8 : i32}
     tt.return
   }
+
   tt.func @matmul_scaled_rhs_scales_tma(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: !tt.tensordesc<tensor<128x64xf8E4M3FN, #shared2>>, %arg4: !tt.tensordesc<tensor<128x64xf8E4M3FN, #shared2>>, %arg5: !tt.tensordesc<tensor<128x8xi8, #shared3>>) {
     %cst = arith.constant dense<127> : tensor<128x8xi8, #linear>
     %cst_0 = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #blocked>
