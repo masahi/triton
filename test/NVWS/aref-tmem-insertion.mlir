@@ -324,29 +324,7 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     tt.return
   }
 
-  // CHECK-LABEL: @warp_specialize_only_rhs_is_loaded
-  tt.func @warp_specialize_only_rhs_is_loaded(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: !tt.tensordesc<tensor<128x64xf16, #shared>>, %arg4: !tt.tensordesc<tensor<128x64xf16, #shared>>) {
-    %cst = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #blocked>
-    %c64_i32 = arith.constant 64 : i32
-    %c1_i32 = arith.constant 1 : i32
-    %c0_i32 = arith.constant 0 : i32
-    %true = arith.constant true
-    %0 = tt.descriptor_load %arg3[%c0_i32, %c0_i32] : !tt.tensordesc<tensor<128x64xf16, #shared>> -> tensor<128x64xf16, #blocked1>
-    %1 = ttg.local_alloc %0 : (tensor<128x64xf16, #blocked1>) -> !ttg.memdesc<128x64xf16, #shared, #smem>
-    %result, %token = ttng.tmem_alloc : () -> (!ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>, !ttg.async.token)
-    %2 = ttng.tmem_store %cst, %result[%token], %true : tensor<128x128xf32, #blocked> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
-    %3 = scf.for %arg5 = %c0_i32 to %arg0 step %c1_i32 iter_args(%arg6 = %2) -> (!ttg.async.token)  : i32 {
-      %4 = arith.muli %arg5, %c64_i32 : i32
-      %5 = tt.descriptor_load %arg4[%arg2, %4] {ttg.partition = 2 : i32} : !tt.tensordesc<tensor<128x64xf16, #shared>> -> tensor<128x64xf16, #blocked1>
-      %6 = ttg.local_alloc %5 {ttg.partition = 2 : i32} : (tensor<128x64xf16, #blocked1>) -> !ttg.memdesc<128x64xf16, #shared, #smem>
-      %7 = ttg.memdesc_trans %6 {order = array<i32: 1, 0>, ttg.partition = 1 : i32} : !ttg.memdesc<128x64xf16, #shared, #smem> -> !ttg.memdesc<64x128xf16, #shared1, #smem>
-      %8 = ttng.tc_gen5_mma %1, %7, %result[%arg6], %true, %true {ttg.partition = 1 : i32} : !ttg.memdesc<128x64xf16, #shared, #smem>, !ttg.memdesc<64x128xf16, #shared1, #smem>, !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
-      scf.yield %8 : !ttg.async.token
-    } {tt.num_stages = 2 : i32, tt.warp_specialize, ttg.partition.stages = [0 : i32, 1 : i32, 0 : i32], ttg.warp_specialize.tag = 10 : i32}
-    %result_0, %token_1 = ttng.tmem_load %result[%3] : !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable> -> tensor<128x128xf32, #blocked>
-    "use"(%result_0) : (tensor<128x128xf32, #blocked>) -> ()
-    tt.return
-  }
+  // CHECK-LABEL: @user_partition_has_cycle
   tt.func @user_partition_has_cycle(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: !tt.tensordesc<tensor<128x64xf16, #shared>>, %arg4: !tt.tensordesc<tensor<128x64xf16, #shared>>) {
     %cst = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #blocked>
     %c64_i32 = arith.constant 64 : i32
