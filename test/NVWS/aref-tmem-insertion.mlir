@@ -278,8 +278,8 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     // CHECK: [[LHS_SCALES_BUF:%.*]] = ttng.tmem_alloc : () -> !ttg.memdesc<128x8xi8,
     // CHECK-NEXT: [[LHS_SCALES_AREF:%.*]] = nvws.aref.create [[LHS_SCALES_BUF]]
     // CHECK-NEXT: {{.*}}, [[LHS_SCALES_TOK:%.*]] = nvws.aref.put.enter [[LHS_SCALES_AREF]]
-    // CHECK-NEXT: [[BUF:%.*]] = nvws.aref.buffer [[LHS_SCALES_AREF]][{{.*}}], [[LHS_SCALES_TOK]]
-    // CHECK-NEXT: tmem_store [[CST]], [[BUF]]
+    // CHECK-NEXT: [[LHS_SCALES_BUF:%.*]] = nvws.aref.buffer [[LHS_SCALES_AREF]][{{.*}}], [[LHS_SCALES_TOK]]
+    // CHECK-NEXT: tmem_store [[CST]], [[LHS_SCALES_BUF]]
     %result = ttng.tmem_alloc %cst : (tensor<128x8xi8, #linear>) -> !ttg.memdesc<128x8xi8, #tmem_scales, #ttng.tensor_memory>
 
     // CHECK-NEXT: [[ABUF:%.*]] = ttng.tmem_alloc
@@ -293,6 +293,11 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     // CHECK-NEXT: [[RHS_SCALES_BUF:%.*]] = ttng.tmem_alloc : () -> !ttg.memdesc<128x8xi8,
     // CHECK-NEXT: [[RHS_SCALES_AREF:%.*]] = nvws.aref.create [[RHS_SCALES_BUF]]
     %1 = scf.for %arg6 = %c0_i32 to %arg0 step %c1_i32 iter_args(%arg7 = %0) -> (!ttg.async.token)  : i32 {
+      // CHECK: [[LHS:%.]] = tt.descriptor_load
+      // CHECK-NEXT: [[RHS:%.*]] = tt.descriptor_load
+      // CHECK-NEXT: [[RHS_SCALES:%.*]] = tt.descriptor_load
+      // CHECK-NEXT: local_alloc [[LHS]]
+      // CHECK-NEXT: local_alloc [[RHS]]
       %2 = arith.muli %arg6, %c64_i32 : i32
       %3 = tt.descriptor_load %arg3[%arg1, %2] {ttg.partition = 2 : i32} : !tt.tensordesc<tensor<128x64xf8E4M3FN, #shared2>> -> tensor<128x64xf8E4M3FN, #blocked1>
       %4 = tt.descriptor_load %arg4[%arg2, %2] {ttg.partition = 2 : i32} : !tt.tensordesc<tensor<128x64xf8E4M3FN, #shared2>> -> tensor<128x64xf8E4M3FN, #blocked1>
@@ -300,10 +305,22 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
       %6 = ttg.local_alloc %3 {ttg.partition = 2 : i32} : (tensor<128x64xf8E4M3FN, #blocked1>) -> !ttg.memdesc<128x64xf8E4M3FN, #shared2, #smem>
       %7 = ttg.local_alloc %4 {ttg.partition = 2 : i32} : (tensor<128x64xf8E4M3FN, #blocked1>) -> !ttg.memdesc<128x64xf8E4M3FN, #shared2, #smem>
       %8 = ttg.memdesc_trans %7 {order = array<i32: 1, 0>, ttg.partition = 1 : i32} : !ttg.memdesc<128x64xf8E4M3FN, #shared2, #smem> -> !ttg.memdesc<64x128xf8E4M3FN, #shared4, #smem>
+      // CHECK: {{.*}}, [[RHS_SCALES_TOK:%.*]] = nvws.aref.put.enter [[RHS_SCALES_AREF]]
+      // CHECK-NEXT: [[BUF:%.*]] = nvws.aref.buffer [[RHS_SCALES_AREF]][{{.*}}], [[RHS_SCALES_TOK]]
+      // CHECK-NEXT: tmem_store [[RHS_SCALES]], [[BUF]]
+      // CHECK-NEXT: nvws.aref.put.exit [[RHS_SCALES_AREF]][{{.*}}], [[RHS_SCALES_TOK]] [#nvws.async_op<none>]
       %result_2 = ttng.tmem_alloc %5 {ttg.partition = 2 : i32} : (tensor<128x8xi8, #linear>) -> !ttg.memdesc<128x8xi8, #tmem_scales, #ttng.tensor_memory>
+
+      // CHECK-NEXT: [[BUF_ACC:%.*]] = nvws.aref.buffer [[AREF]][{{.*}}], [[ATOK]]
+      // CHECK-NEXT: {{.*}}, [[RHS_TOK:%.*]] = nvws.aref.get.enter [[RHS_SCALES_AREF]][{{.*}}]
+      // CHECK-NEXT: [[RHS_SCALES_BUF:%.*]] = nvws.aref.buffer [[RHS_SCALES_AREF]][{{.*}}], [[RHS_TOK]]
+      // CHECK-NEXT: tc_gen5_mma_scaled {{.*}}, {{.*}}, [[BUF_ACC]][], [[LHS_SCALES_BUF]], [[RHS_SCALES_BUF]]
+      // CHECK-NEXT: nvws.aref.get.exit [[RHS_SCALES_AREF]][{{.*}}], [[RHS_TOK]] [#nvws.async_op<tc5mma>]
       %9 = ttng.tc_gen5_mma_scaled %6, %8, %result_1[%arg7], %result, %result_2, %true, %true lhs = e4m3 rhs = e4m3 {ttg.partition = 1 : i32} : !ttg.memdesc<128x64xf8E4M3FN, #shared2, #smem>, !ttg.memdesc<64x128xf8E4M3FN, #shared4, #smem>, !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>, !ttg.memdesc<128x8xi8, #tmem_scales, #ttng.tensor_memory>, !ttg.memdesc<128x8xi8, #tmem_scales, #ttng.tensor_memory>
       scf.yield %9 : !ttg.async.token
     } {tt.warp_specialize, ttg.partition.stages = [0 : i32, 1 : i32, 0 : i32], ttg.warp_specialize.tag = 9 : i32}
+    // CHECK: nvws.aref.put.exit [[AREF]][{{.*}}], [[ATOK]] [#nvws.async_op<tc5mma>]
+    // CHECK-NEXT: nvws.aref.put.exit [[LHS_SCALES_AREF]][{{.*}}], [[LHS_SCALES_TOK]] [#nvws.async_op<tc5mma>]
     tt.return
   }
   tt.func @warp_specialize_only_rhs_is_loaded(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: !tt.tensordesc<tensor<128x64xf16, #shared>>, %arg4: !tt.tensordesc<tensor<128x64xf16, #shared>>) {
