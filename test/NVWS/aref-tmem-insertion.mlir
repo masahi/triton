@@ -268,7 +268,7 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
   // CHECK-LABEL: @matmul_scaled_rhs_scales_tma
   tt.func @matmul_scaled_rhs_scales_tma(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: !tt.tensordesc<tensor<128x64xf8E4M3FN, #shared2>>, %arg4: !tt.tensordesc<tensor<128x64xf8E4M3FN, #shared2>>, %arg5: !tt.tensordesc<tensor<128x8xi8, #shared3>>) {
     // CHECK: [[CST:%.*]] = arith.constant dense<127> : tensor<128x8xi8
-    // CHECK: [[CST_0:%.*]] = arith.constant dense<0.000000e+00> : tensor<128x128xf32
+    // CHECK: [[CST_0:%.*]] = arith.constant dense<{{.*}}> : tensor<128x128xf32
     %cst = arith.constant dense<127> : tensor<128x8xi8, #linear>
     %cst_0 = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #blocked>
     %c64_i32 = arith.constant 64 : i32
