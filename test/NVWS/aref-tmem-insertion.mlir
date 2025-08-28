@@ -267,6 +267,7 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
 
   // CHECK-LABEL: @matmul_scaled_rhs_scales_tma
   tt.func @matmul_scaled_rhs_scales_tma(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: !tt.tensordesc<tensor<128x64xf8E4M3FN, #shared2>>, %arg4: !tt.tensordesc<tensor<128x64xf8E4M3FN, #shared2>>, %arg5: !tt.tensordesc<tensor<128x8xi8, #shared3>>) {
+    // CHECK: [[CST:%.*]] = arith.constant dense<127> : tensor<128x8xi8
     %cst = arith.constant dense<127> : tensor<128x8xi8, #linear>
     %cst_0 = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #blocked>
     %c64_i32 = arith.constant 64 : i32
@@ -275,7 +276,13 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     %true = arith.constant true
     // CHECK: [[SCALESBUF:%.*]] = ttng.tmem_alloc : () -> !ttg.memdesc<128x8xi8,
     // CHECK-NEXT: [[SCALES_AREF:%.*]] = nvws.aref.create [[SCALESBUF]]
+    // CHECK-NEXT: {{.*}}, [[SCALES_TOK:%.*]] = nvws.aref.put.enter [[SCALES_AREF]]
+    // CHECK-NEXT: [[BUF:%.*]] = nvws.aref.buffer [[SCALES_AREF]][{{.*}}], [[SCALES_TOK]]
+    // CHECK-NEXT: tmem_store [[CST]], [[BUF]]
     %result = ttng.tmem_alloc %cst : (tensor<128x8xi8, #linear>) -> !ttg.memdesc<128x8xi8, #tmem_scales, #ttng.tensor_memory>
+
+    // CHECK-NEXT: [[ABUF:%.*]] = ttng.tmem_alloc
+    // CHECK-NEXT: [[AREF:%.*]] = nvws.aref.create [[ABUF]]
     %result_1, %token = ttng.tmem_alloc : () -> (!ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>, !ttg.async.token)
     %0 = ttng.tmem_store %cst_0, %result_1[%token], %true : tensor<128x128xf32, #blocked> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
     %1 = scf.for %arg6 = %c0_i32 to %arg0 step %c1_i32 iter_args(%arg7 = %0) -> (!ttg.async.token)  : i32 {
