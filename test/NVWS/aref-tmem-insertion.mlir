@@ -333,6 +333,10 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     %false = arith.constant false
     %true = arith.constant true
     %0 = tt.descriptor_load %arg3[%c0_i32, %c0_i32] : !tt.tensordesc<tensor<128x64xf16, #shared>> -> tensor<128x64xf16, #blocked1>
+    // CHECK: [[BUF:%.*]] = ttng.tmem_alloc
+    // CHECK-NEXT: [[AREF:%.*]] = nvws.aref.create [[BUF]]
+    // CHECK-NEXT: {{.*}}, [[ATOK:%.*]] = nvws.aref.put.enter [[AREF]]
+    // CHECK-NEXT: scf.for {{.*}} iter_args({{.*}}, [[TOK:%.*]] = [[ATOK]])
     %1 = ttg.local_alloc %0 : (tensor<128x64xf16, #blocked1>) -> !ttg.memdesc<128x64xf16, #shared, #smem>
     %result, %token = ttng.tmem_alloc : () -> (!ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>, !ttg.async.token)
     %2:2 = scf.for %arg5 = %c0_i32 to %arg0 step %c1_i32 iter_args(%arg6 = %cst, %arg7 = %token) -> (tensor<128x128xf32, #blocked>, !ttg.async.token)  : i32 {
@@ -340,6 +344,8 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
       %4 = tt.descriptor_load %arg4[%arg2, %3] {ttg.partition = 2 : i32} : !tt.tensordesc<tensor<128x64xf16, #shared>> -> tensor<128x64xf16, #blocked1>
       %5 = ttg.local_alloc %4 {ttg.partition = 2 : i32} : (tensor<128x64xf16, #blocked1>) -> !ttg.memdesc<128x64xf16, #shared, #smem>
       %6 = ttg.memdesc_trans %5 {order = array<i32: 1, 0>, ttg.partition = 1 : i32} : !ttg.memdesc<128x64xf16, #shared, #smem> -> !ttg.memdesc<64x128xf16, #shared1, #smem>
+      // CHECK: [[BUF:%.*]] = nvws.aref.buffer [[AREF]][{{.*}}], [[TOK]]
+      // CHECK-NEXT tc_gen5_mma {{.*}} [[BUF]]
       %7 = ttng.tc_gen5_mma %1, %6, %result[%arg7], %false, %true {ttg.partition = 1 : i32} : !ttg.memdesc<128x64xf16, #shared, #smem>, !ttg.memdesc<64x128xf16, #shared1, #smem>, !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
       %8 = arith.addf %arg6, %arg6 {ttg.partition = 0 : i32} : tensor<128x128xf32, #blocked>
       %result_0, %token_1 = ttng.tmem_load %result[%7] {ttg.partition = 0 : i32} : !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable> -> tensor<128x128xf32, #blocked>
