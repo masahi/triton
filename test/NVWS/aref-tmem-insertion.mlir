@@ -29,6 +29,8 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     // CHECK: [[ABUF:%.*]] = ttng.tmem_alloc : () -> !ttng.memdesc<1x128x12xf32
     // CHECK-NEXT: [[AREF:%.*] = nvws.aref.create [[ABUF]]
     // CHECK-NEXT: {{*.}}, [[ATOK:.*]] = nvws.aref.put.enter [[AREF]][[[C0]], [[C0]]]
+    // CHECK-NEXT: [[BUF:%.*]] = nvwa.aref.buffer [[AREF]][[C0]], [[ATOK]]
+    // CHECK-NEXT: tmem_store {{.*}}, [[BUF]]
     %0 = ttng.tmem_store %cst, %result[%token], %true : tensor<128x128xf32, #blocked> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
     %1 = scf.for %arg5 = %c0_i32 to %arg0 step %c1_i32 iter_args(%arg6 = %0) -> (!ttg.async.token)  : i32 {
       %2 = arith.muli %arg5, %c64_i32 : i32
