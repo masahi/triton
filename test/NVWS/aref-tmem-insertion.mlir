@@ -195,8 +195,8 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     %true = arith.constant true
     %c1_i32 = arith.constant 1 : i32
     %c0_i32 = arith.constant 0 : i32
-    // CHECK: [[AREf:%.*]] = nvws.aref.create
-    // CHECK-NEXT: {{.*}}, [[ATOK:%.*]] = nvws.aref.put.enter [[AREf]]
+    // CHECK: [[AREF:%.*]] = nvws.aref.create
+    // CHECK-NEXT: {{.*}}, [[ATOK:%.*]] = nvws.aref.put.enter [[AREF]]
     %result, %token = ttng.tmem_alloc : () -> (!ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>, !ttg.async.token)
     %0 = ttng.tmem_store %cst, %result[%token], %true : tensor<128x128xf32, #blocked> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
     // CHECK: [[TOK2:%.*]] = scf.for [[I:%.*]] = [[UB:%.*]] to [[LB:%.*]] step [[STEP:%.*]] iter_args([[TOK:%.*]] = [[ATOK]])
@@ -265,6 +265,7 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     tt.return
   }
 
+  // CHECK-LABEL: @matmul_scaled_rhs_scales_tma
   tt.func @matmul_scaled_rhs_scales_tma(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: !tt.tensordesc<tensor<128x64xf8E4M3FN, #shared2>>, %arg4: !tt.tensordesc<tensor<128x64xf8E4M3FN, #shared2>>, %arg5: !tt.tensordesc<tensor<128x8xi8, #shared3>>) {
     %cst = arith.constant dense<127> : tensor<128x8xi8, #linear>
     %cst_0 = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #blocked>
@@ -272,6 +273,7 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     %c1_i32 = arith.constant 1 : i32
     %c0_i32 = arith.constant 0 : i32
     %true = arith.constant true
+    // CHECK: [[SCALESBUF:%.*]] = ttng.tmem_alloc : () -> !ttg.memdesc<128x8xi8,
     %result = ttng.tmem_alloc %cst : (tensor<128x8xi8, #linear>) -> !ttg.memdesc<128x8xi8, #tmem_scales, #ttng.tensor_memory>
     %result_1, %token = ttng.tmem_alloc : () -> (!ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>, !ttg.async.token)
     %0 = ttng.tmem_store %cst_0, %result_1[%token], %true : tensor<128x128xf32, #blocked> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
