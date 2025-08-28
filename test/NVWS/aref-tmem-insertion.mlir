@@ -323,6 +323,8 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     // CHECK-NEXT: nvws.aref.put.exit [[LHS_SCALES_AREF]][{{.*}}], [[LHS_SCALES_TOK]] [#nvws.async_op<tc5mma>]
     tt.return
   }
+
+  // CHECK-LABEL: @warp_specialize_only_rhs_is_loaded
   tt.func @warp_specialize_only_rhs_is_loaded(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: !tt.tensordesc<tensor<128x64xf16, #shared>>, %arg4: !tt.tensordesc<tensor<128x64xf16, #shared>>) {
     %cst = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #blocked>
     %c64_i32 = arith.constant 64 : i32
