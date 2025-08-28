@@ -522,64 +522,6 @@ public:
   }
 };
 
-bool isProducerLoad(ArefCreateOp arefOp) {
-  for (auto user : arefOp.getResult().getUsers()) {
-    if (auto putOp = dyn_cast<ArefPutEnterOp>(user)) {
-      for (auto buffer : putOp.getBuffers()) {
-        for (auto user : buffer.getUsers()) {
-          if (isa<triton::nvws::DescriptorLoadOpInterface>(user)) {
-            return true;
-          }
-        }
-      }
-    }
-  }
-  return false;
-}
-
-void multiBufferAref(const SmallVector<ArefCreateOp> &arefOps, int numStages) {
-  SmallVector<Operation *> allocsToErase;
-  for (auto arefOp : arefOps) {
-    SmallVector<Value> allocOps;
-    SmallVector<Type> arefTypes;
-
-    bool eligible = true;
-    for (auto opnd : arefOp.getOperands()) {
-      if (!opnd.getDefiningOp()) {
-        eligible = false;
-      }
-    }
-
-    if (!eligible) {
-      continue;
-    }
-
-    OpBuilder builder(arefOp);
-    for (auto opnd : arefOp.getOperands()) {
-      auto oldAlloc = opnd.getDefiningOp();
-      auto arefBufType = cast<MemDescType>(opnd.getType());
-      arefBufType =
-          getMultiBufferedType(getBufferViewType(arefBufType, true), numStages);
-      Operation *newAlloc = triton::nvws::createAlloc(
-          builder, oldAlloc->getLoc(), arefBufType, Value());
-      allocOps.push_back(newAlloc->getResult(0));
-      arefTypes.push_back(arefBufType);
-      oldAlloc->replaceAllUsesWith(newAlloc);
-      allocsToErase.push_back(oldAlloc);
-    }
-
-    auto newAref =
-        createArefCreateOp(builder, arefTypes, allocOps, arefOp.getLoc());
-
-    arefOp.getResult().replaceAllUsesWith(newAref.getResult());
-    arefOp.erase();
-  }
-
-  for (auto alloc : allocsToErase) {
-    alloc->erase();
-  }
-}
-
 template <typename EnterOp, typename ExitOp>
 void createCombinedArefOps(SmallVector<EnterOp> &enterOps,
                            SmallVector<ExitOp> &exitOps, ArefCreateOp aref,
@@ -753,16 +695,6 @@ public:
     for (scf::ForOp loop : loops) {
       combineArefs(loop);
     }
-
-    SmallVector<ArefCreateOp> arefOps;
-    m.walk([&](ArefCreateOp arefOp) {
-      // Only handles arefs whose producer (a partition with PutEnter / Exit)
-      // does load from global to shared memory.
-      if (isProducerLoad(arefOp)) {
-        arefOps.push_back(arefOp);
-      }
-    });
-    multiBufferAref(arefOps, numStages);
 
     mlir::RewritePatternSet patterns(context);
     patterns.add<LowerArefCreate>(context);

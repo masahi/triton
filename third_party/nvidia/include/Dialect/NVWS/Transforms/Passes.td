@@ -58,6 +58,12 @@ def NVWSAssignStagePhase : Pass<"nvws-assign-stage-phase", "mlir::ModuleOp"> {
     "mlir::triton::gpu::TritonGPUDialect",
     "mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect"
   ];
+
+
+  let options = [
+    Option<"numStages", "num-stages", "int32_t", /*default*/"3",
+           "number of pipeline stages">
+  ];
 }
 
 def NVWSLowerAref : Pass<"nvws-lower-aref", "mlir::ModuleOp"> {
@@ -79,11 +85,6 @@ def NVWSLowerAref : Pass<"nvws-lower-aref", "mlir::ModuleOp"> {
     "mlir::triton::TritonDialect",
     "mlir::triton::gpu::TritonGPUDialect",
     "mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect"
-  ];
-
-  let options = [
-    Option<"numStages", "num-stages", "int32_t", /*default*/"3",
-           "number of pipeline stages">
   ];
 }
 
