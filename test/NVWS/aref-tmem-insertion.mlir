@@ -278,7 +278,7 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     // CHECK: [[LHS_SCALES_BUF:%.*]] = ttng.tmem_alloc : () -> !ttg.memdesc<128x8xi8,
     // CHECK-NEXT: [[LHS_SCALES_AREF:%.*]] = nvws.aref.create [[LHS_SCALES_BUF]]
     // CHECK-NEXT: {{.*}}, [[LHS_SCALES_TOK:%.*]] = nvws.aref.put.enter [[LHS_SCALES_AREF]]
-    // CHECK-NEXT: [[LHS_SCALES_BUF:%.*]] = nvws.aref.buffer [[LHS_SCALES_AREF]][{{.*}}], [[LHS_SCALES_TOK]]
+    // CHECK-NEXT: [[BUF:%.*]] = nvws.aref.buffer [[LHS_SCALES_AREF]][{{.*}}], [[LHS_SCALES_TOK]]
     // CHECK-NEXT: tmem_store [[CST]], [[BUF]]
     %result = ttng.tmem_alloc %cst : (tensor<128x8xi8, #linear>) -> !ttg.memdesc<128x8xi8, #tmem_scales, #ttng.tensor_memory>
 
