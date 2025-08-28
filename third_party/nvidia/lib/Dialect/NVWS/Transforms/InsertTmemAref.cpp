@@ -616,7 +616,7 @@ LogicalResult runOnFunction(triton::FuncOp funcOp) {
   // llvm::errs() << "===> 2:FuncOp: " << funcOp.getSymName() << "\n";
   for (auto &accessDag : tmemDags) {
     LLVM_DEBUG({ accessDag.printDag(llvm::dbgs()); });
-    accessDag.printDag(llvm::errs());
+    // accessDag.printDag(llvm::errs());
     auto partitions = accessDag.collectPartitions(accessDag.getRootNode());
     assert(partitions.size() <= 2 && "expecting at most 2 partitions");
     if (!partitions.empty())
