@@ -101,6 +101,8 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     // CHECK: nvws.aref.put.exit [[AREF]][[[C0]]], [[TOK1]] [#nvws.async_op<none>]
     tt.return
   }
+
+  // CHECK-LABEL: @matmul_tma_acc_with_conditional_user
   tt.func @matmul_tma_acc_with_conditional_user(%arg0: !tt.tensordesc<tensor<128x64xf16, #shared>>, %arg1: !tt.tensordesc<tensor<64x128xf16, #shared>>) {
     %c32_i32 = arith.constant 32 : i32
     %cst = arith.constant dense<1.000000e+00> : tensor<128x128xf32, #blocked>
@@ -108,8 +110,15 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
     %true = arith.constant true
     %c1_i32 = arith.constant 1 : i32
     %c0_i32 = arith.constant 0 : i32
+
+    // CHECK: [[ABUF:%.*]] = ttng.tmem_alloc : () -> !ttg.memdesc<2x128x128xf32,
+    // CHECK-NEXT: [[AREF:%.*]] = nvws.aref.create [[ABUF]]
+    // CHECK-NEXT: {{.*}}, [[ATOK:%.*]] = nvws.aref.put.enter [[AREF]][[[C0]], [[C0]]]
+    // CHECK-NEXT: [[BUF:%.*]] = nvws.aref.buffer [[AREF]][[[C0]]], [[ATOK]]
+    // CHECK-NEXT: tmem_store {{.*}}, [[BUF]]
     %result, %token = ttng.tmem_alloc : () -> (!ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>, !ttg.async.token)
     %0 = ttng.tmem_store %cst_0, %result[%token], %true : tensor<128x128xf32, #blocked> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
+    // CHECK: [[TOK2:%.*]] = scf.for [[I:%.*]] = [[UB:%.*]] to [[LB:%.*]] step [[STEP:%.*]] iter_args([[TOK:%.*]] = [[ATOK]])
     %1 = scf.for %arg2 = %c0_i32 to %c32_i32 step %c1_i32 iter_args(%arg3 = %0) -> (!ttg.async.token)  : i32 {
       %2:3 = "get_offsets"(%arg2) : (i32) -> (i32, i32, i32)
       %3 = tt.descriptor_load %arg0[%2#0, %2#2] {ttg.partition = 2 : i32} : !tt.tensordesc<tensor<128x64xf16, #shared>> -> tensor<128x64xf16, #blocked1>
@@ -118,16 +127,29 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
       %6 = ttg.local_alloc %4 {ttg.partition = 2 : i32} : (tensor<64x128xf16, #blocked1>) -> !ttg.memdesc<64x128xf16, #shared, #smem>
       %7 = ttng.tc_gen5_mma %5, %6, %result[%arg3], %true, %true {ttg.partition = 1 : i32} : !ttg.memdesc<128x64xf16, #shared, #smem>, !ttg.memdesc<64x128xf16, #shared, #smem>, !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
       %8 = arith.cmpi eq, %arg2, %c0_i32 : i32
+      // CHECK: [[TOK1:%.*]] = scf.if
       %9 = scf.if %8 -> (!ttg.async.token) {
+        // CHECK-NEXT:  nvws.aref.put.exit [[AREF]][[[C0]]], [[TOK]] [#nvws.async_op<tc5mma>] {ttg.partition = 1 : i32}
+        // CHECK-NEXT: {{.*}}, [[TOK:%.*]] = nvws.aref.get.enter [[AREF]][[[C0]], [[C0]]] {ttg.partition = 0 : i32}
+        // CHECK-NEXT: [[BUF:%.*]] = nvws.aref.buffer [[AREF]][[[C0]]], [[TOK]]
+        // CHECK-NEXT: tmem_load [[BUF]]
+        // CHECK-NEXT: nvws.aref.get.exit [[AREF]][[[C0]]], [[TOK]] [#nvws.async_op<none>] {ttg.partition = 0 : i32}
+        // CHECK-NEXT: "acc_user"
+
+        // CHECK-NEXT: {{.*}}, [[TOK:%.*]] = nvws.aref.put.enter [[AREF]][[[C0]], [[C0]]] {ttg.partition = 1 : i32}
+        // CHECK-NEXT: yield [[TOK]]
         %result_1, %token_2 = ttng.tmem_load %result[%7] : !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable> -> tensor<128x128xf32, #blocked>
         "acc_user"(%result_1) : (tensor<128x128xf32, #blocked>) -> ()
         scf.yield %token_2 : !ttg.async.token
       } else {
         scf.yield %7 : !ttg.async.token
       } {ttg.partition = 0 : i32}
+      // CHECK: [[BUF:%.*]] = nvws.aref.buffer [[AREF]][[[C0]]], [[TOK1]]
+      // CHECK-NEXT: tmem_store {{.*}}, [[BUF]]
       %10 = ttng.tmem_store %cst, %result[%9], %true {ttg.partition = 1 : i32} : tensor<128x128xf32, #blocked> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
       scf.yield %10 : !ttg.async.token
     } {tt.num_stages = 2 : i32, tt.warp_specialize, ttg.partition.stages = [0 : i32, 1 : i32, 0 : i32], ttg.warp_specialize.tag = 5 : i32}
+    // CHECK: nvws.aref.put.exit [[AREF]][[[C0]]], [[TOK2]] [#nvws.async_op<none>]
     tt.return
   }
   tt.func @matmul_tma_acc_with_conditional_def(%arg0: !tt.tensordesc<tensor<128x64xf16, #shared>>, %arg1: !tt.tensordesc<tensor<64x128xf16, #shared>>) {
