@@ -152,6 +152,10 @@ BarrierCount getArrivalCount(ArefCreateOp op) {
       }
     }
   }
+  if (count.producerPendingCount == 0)
+    count.producerPendingCount = 1;
+  if (count.consumerPendingCount == 0)
+    count.consumerPendingCount = 1;
 
   return count;
 }
@@ -180,6 +184,9 @@ ArefValue createAndInitMbar(ArefCreateOp op, PatternRewriter &rewriter) {
       arefTy.getBaseType(), [](Type type) { return cast<MemDescType>(type); }));
   auto shape = arefBufTypes[0].getShape();
   auto depth = shape[0];
+  if (isa<nvidia_gpu::TensorMemoryScalesEncodingAttr>(
+          arefBufTypes[0].getEncoding()))
+    depth = 1;
 
   SetVector<Operation *> arefUsers;
   for (auto user : op->getUsers())
@@ -205,17 +212,20 @@ SmallVector<Value> getSubViews(ArefValue arefVal, Value stage, Location loc,
   for (auto buffer : arefVal.buffers) {
     auto memDescType = cast<MemDescType>(buffer.getType());
     auto shape = memDescType.getShape();
-    auto rank = shape.size() - 1;
-
-    SmallVector<int64_t> tensorShape(shape.begin() + 1, shape.end());
-    auto memDescTypeNew = MemDescType::get(
-        tensorShape, memDescType.getElementType(), memDescType.getEncoding(),
-        memDescType.getMemorySpace(), true);
-    // TODO partition
-    auto singleBuffer =
-        rewriter.create<MemDescIndexOp>(loc, memDescTypeNew, buffer, stage);
-    assignStageCluster(singleBuffer, partitionId, stageCluster, rewriter);
-    views.push_back(singleBuffer);
+    if (isa<nvidia_gpu::TensorMemoryScalesEncodingAttr>(
+            memDescType.getEncoding())) {
+      views.push_back(buffer);
+    } else {
+      SmallVector<int64_t> tensorShape(shape.begin() + 1, shape.end());
+      auto memDescTypeNew = MemDescType::get(
+          tensorShape, memDescType.getElementType(), memDescType.getEncoding(),
+          memDescType.getMemorySpace(), true);
+      // TODO partition
+      auto singleBuffer =
+          rewriter.create<MemDescIndexOp>(loc, memDescTypeNew, buffer, stage);
+      assignStageCluster(singleBuffer, partitionId, stageCluster, rewriter);
+      views.push_back(singleBuffer);
+    }
   }
 
   return views;
@@ -470,7 +480,7 @@ void rewriteGetExitOp(ArefGetExitOp op, PatternRewriter &rewriter,
   assignStageCluster(emptyBarrier.getDefiningOp(), getPartitionId(op),
                      stageCluster, rewriter);
   insertArriveBarrier(loc, asyncKinds, rewriter, emptyBarrier,
-		      getPartitionId(op), stageCluster);
+                      getPartitionId(op), stageCluster);
 }
 
 DenseSet<MMAv5OpInterface> getAsyncMMAv5Consumers(Value aref) {
@@ -646,20 +656,20 @@ ExitOp createCombinedArefOps(SmallVector<EnterOp> &enterOps,
   } else {
     builder.setInsertionPoint(firstEnter);
   }
-  auto combinedEnter = builder.create<EnterOp>(firstEnter.getLoc(), arefEnterBuffers,
-                                       builder.getType<AsyncTokenType>(), aref,
-                                       zero, zero);
+  auto combinedEnter = builder.create<EnterOp>(
+      firstEnter.getLoc(), arefEnterBuffers, builder.getType<AsyncTokenType>(),
+      aref, zero, zero);
   assignStageCluster(combinedEnter, getPartitionId(firstEnter),
                      getStageCluster(firstEnter), builder);
 
   builder.setInsertionPoint(lastExit);
   llvm::SmallVector<Attribute> AsyncOpAttrs(opAttrsSet.begin(),
                                             opAttrsSet.end());
-  auto combinedExit =
-      builder.create<ExitOp>(firstEnter.getLoc(), aref, combinedEnter.getToken(), zero,
-                             builder.getArrayAttr(AsyncOpAttrs));
-  assignStageCluster(combinedExit, getPartitionId(lastExit), getStageCluster(lastExit),
-                     builder);
+  auto combinedExit = builder.create<ExitOp>(
+      firstEnter.getLoc(), aref, combinedEnter.getToken(), zero,
+      builder.getArrayAttr(AsyncOpAttrs));
+  assignStageCluster(combinedExit, getPartitionId(lastExit),
+                     getStageCluster(lastExit), builder);
 
   std::function<void(Operation *, Operation *)> moveUserAfter =
       [&](Operation *op, Operation *target) {
@@ -712,7 +722,8 @@ void combineArefs(scf::ForOp loop) {
   SmallVector<ArefGetEnterOp> getEnterOps;
   loop.walk([&](ArefGetEnterOp op) { getEnterOps.push_back(op); });
 
-  // Arefs whose get-enter ops share the same dominant consumer can be combined
+  // Arefs whose get-enter ops share the same dominant consumer can be
+  // combined
   DominanceInfo domInfo(loop);
   llvm::DenseMap<Operation *, SmallVector<ArefGetEnterOp>> liveBeforeGroups;
   for (auto getEnterOp : getEnterOps) {

@@ -443,7 +443,12 @@ insertTmemArefImpl(TmemAccessDag::Node *node,
       b.setInsertionPointToStart(node->op->getBlock());
       prevPartitionId = node->parentDag->partitionId;
     }
-
+    if (!node->partitionId) {
+      // if node->partitionId is not set, it means we are outside ws-region
+      // reset prevPartitionId and prevStageCluster to defaults
+      prevPartitionId = {};
+      prevStageCluster = {};
+    }
     state.release(b, prevOp->getLoc(), {prevPartitionId, prevStageCluster});
 
     // acquire right before op that acquires ownership of tmem
