@@ -318,6 +318,8 @@ void rewritePutEnterOp(ArefPutEnterOp op, PatternRewriter &rewriter,
       break;
     }
   }
+  if (!exitOp)
+    return;
   assert(exitOp);
   assert(exitOp.getAref() == op.getAref() &&
          "Expecting matching Aref on the ArefPutExitOp");
@@ -476,7 +478,7 @@ DenseSet<MMAv5OpInterface> getAsyncMMAv5Consumers(Value aref) {
   for (auto arefUser : aref.getUsers()) {
     if (auto getEnter = dyn_cast<ArefGetEnterOp>(arefUser)) {
       auto id = getPartitionId(getEnter);
-      if (id && id->second == 0) {
+      if (id && id->index() == 0) {
         // Ignore mmav5 ops in the default partition. They are not warp
         // specialized.
         continue;
@@ -528,6 +530,8 @@ public:
         rewritePutExitOp(user, rewriter, aref);
       } else if (auto user = dyn_cast<ArefGetExitOp>(userOp)) {
         rewriteGetExitOp(user, rewriter, aref);
+      } else if (auto user = dyn_cast<ArefBufferOp>(userOp)) {
+        rewriteArefBufferOp(user, rewriter, aref);
       } else {
         llvm_unreachable("users of aref can only be ArefPut or ArefGet");
       }
@@ -573,7 +577,7 @@ void multiBufferAref(const SmallVector<ArefCreateOp> &arefOps, int numStages) {
 
     bool eligible = true;
     for (auto opnd : arefOp.getOperands()) {
-      if (!opnd.getDefiningOp()) {
+      if (!opnd.getDefiningOp() || isa<TMEMAllocOp>(opnd.getDefiningOp())) {
         eligible = false;
       }
     }
