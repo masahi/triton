@@ -16,6 +16,7 @@
 #include "llvm/ADT/SCCIterator.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/ErrorHandling.h"
 
 using namespace mlir;
 using namespace triton;
@@ -105,12 +106,23 @@ SmallVector<LoopVarCategory> classifyLoopVars(scf::ForOp loop,
                                               const Partition *partition,
                                               const WarpSchedule &schedule) {
   auto inPartition = [&](Operation *op) {
+    const Partition *opPartition = schedule.getPartition(op);
     if (auto ifOp = dyn_cast<scf::IfOp>(op->getParentOp())) {
-      auto opPartitions = getPartitionIndicesToCloneInto(ifOp, schedule);
-      return llvm::is_contained(opPartitions, partition->getIndex());
+      auto parentPartitionIndices =
+          getPartitionIndicesToCloneInto(ifOp, schedule);
+      if (parentPartitionIndices.size() == schedule.getNumPartitions()) {
+        return opPartition == schedule.getRootPartition();
+      }
+      if (isa<scf::YieldOp>(op)) {
+        return false;
+      }
+      return opPartition == partition;
     }
-    const Partition *opPartition =
-        schedule.getPartition(loop.getBody()->findAncestorOpInBlock(*op));
+    // const Partition *opPartition =
+    //     schedule.getPartition(loop.getBody()->findAncestorOpInBlock(*op));
+
+    if (isa<scf::YieldOp>(op))
+      return false;
     return llvm::is_contained({partition, schedule.getRootPartition()},
                               opPartition);
   };
@@ -170,6 +182,28 @@ getLoopVarIndicesToKeep(scf::ForOp loop, const Partition *partition,
   return getLoopVarIndicesToKeep(loop, partition, loopVarCategories);
 }
 
+SmallVector<size_t> getIfArgumentIndicesToKeep(scf::IfOp ifOp, const Partition *partition,
+					       const WarpSchedule &schedule) {
+  auto inPartition = [&](Operation *op) {
+    if (auto ifOp = dyn_cast<scf::IfOp>(op->getParentOp())) {
+      auto opPartitions = getPartitionIndicesToCloneInto(ifOp, schedule);
+      return llvm::is_contained(opPartitions, partition->getIndex());
+    }
+    const Partition *opPartition = schedule.getPartition(op);
+    return llvm::is_contained({partition, schedule.getRootPartition()},
+                              opPartition);
+  };
+
+  SmallVector<size_t> indices;
+  for (auto [i, arg] : llvm::enumerate(ifOp.thenBlock()->getTerminator()->getOperands())) {
+    // HACK
+    if (llvm::is_contained({partition, schedule.getRootPartition()}, schedule.getPartition(arg.getDefiningOp()))) {
+      indices.push_back(i);
+    }
+  }
+  return indices;
+}
+
 const Partition *getPartition(Operation *op, const WarpSchedule &schedule) {
   auto origOp = op;
   while (op && !schedule.getPartition(op)) {
@@ -187,6 +221,13 @@ const Partition *getPartition(Operation *op, const WarpSchedule &schedule) {
 void mapRange(ValueRange fromRange, ValueRange toRange, IRMapping &mapping) {
   for (auto [from, to] : llvm::zip(fromRange, toRange)) {
     mapping.map(from, to);
+  }
+}
+
+void mapRange(ValueRange fromRange, ArrayRef<size_t> fromIndices,
+              ValueRange toRange, IRMapping &mapping) {
+  for (auto [fromIdx, to] : llvm::zip(fromIndices, toRange)) {
+    mapping.map(fromRange[fromIdx], to);
   }
 }
 
@@ -239,24 +280,34 @@ void cloneForOp(scf::ForOp forOp, SmallVector<WarpGroupBuilder> &builders,
 
 void cloneIfOp(scf::IfOp ifOp, SmallVector<WarpGroupBuilder> &builders,
                const WarpSchedule &schedule) {
-  llvm::outs() << "cloneIfOp\n";
   auto partitionIndices = getPartitionIndicesToCloneInto(ifOp, schedule);
-
   SmallVector<scf::IfOp> newIfOps;
+
+  auto gather = [](auto arr, ArrayRef<size_t> indices) {
+    SmallVector<decltype(arr[0])> ret;
+    for (auto i : indices) {
+      ret.push_back(arr[i]);
+    }
+    return ret;
+  };
+
   for (size_t idx : partitionIndices) {
     auto &b = builders[idx];
+    auto argumentIndices =
+        getIfArgumentIndicesToKeep(ifOp, schedule.getPartition(idx), schedule);
     auto cond = b.mapping.lookupOrDefault(ifOp.getCondition());
-    auto newIfOp = b.create<scf::IfOp>(ifOp.getLoc(), ifOp.getResultTypes(),
-                                       cond, ifOp.elseBlock() ? true : false);
+    auto newIfOp = b.create<scf::IfOp>(
+        ifOp.getLoc(), gather(ifOp.getResultTypes(), argumentIndices), cond,
+        ifOp.elseBlock() ? true : false);
     newIfOp->setAttrs(ifOp->getAttrs());
     newIfOps.push_back(newIfOp);
 
-    mapRange(ifOp.getResults(), newIfOp.getResults(), b.mapping);
-    mapRange(ifOp.thenBlock()->getArguments(),
+    mapRange(ifOp.getResults(), argumentIndices, newIfOp.getResults(), b.mapping);
+    mapRange(ifOp.thenBlock()->getArguments(), argumentIndices,
              newIfOp.thenBlock()->getArguments(), b.mapping);
 
     if (ifOp.elseBlock()) {
-      mapRange(ifOp.elseBlock()->getArguments(),
+      mapRange(ifOp.elseBlock()->getArguments(), argumentIndices,
                newIfOp.elseBlock()->getArguments(), b.mapping);
     }
 
@@ -355,7 +406,6 @@ void cloneOpsInBlock(Block *block, SmallVector<WarpGroupBuilder> &builders,
       }
 
       for (size_t idx : partitionIndices) {
-	llvm::outs() << idx << "\n";
         auto &builder = builders[idx];
         SmallVector<size_t> newOperandIndices;
         if (auto forOp = dyn_cast<scf::ForOp>(yieldOp->getParentOp())) {
@@ -363,10 +413,11 @@ void cloneOpsInBlock(Block *block, SmallVector<WarpGroupBuilder> &builders,
               getLoopVarIndicesToKeep(
                   forOp, schedule.getPartition(builder.partitionId), schedule)
                   .first;
+        } else if (auto ifOp = dyn_cast<scf::IfOp>(yieldOp->getParentOp())) {
+          newOperandIndices = getIfArgumentIndicesToKeep(
+              ifOp, schedule.getPartition(builder.partitionId), schedule);
         } else {
-          for (size_t i = 0; i < yieldOp.getOperands().size(); ++i) {
-            newOperandIndices.push_back(i);
-          }
+          assert(false);
         }
 
         SmallVector<Value> newYieldOperands;
@@ -534,10 +585,10 @@ LogicalResult triton::gpu::partitionLoop(scf::ForOp loop) {
     }
   }
 
-  //  loop->getParentOfType<ModuleOp>().dump();
+  loop->getParentOfType<ModuleOp>().dump();
 
-  for (auto op : llvm::reverse(opsToErase))
-    op->erase();
+  // for (auto op : llvm::reverse(opsToErase))
+  //   op->erase();
 
   return success();
 }
