@@ -41,6 +41,7 @@
 #include "nvidia/include/Dialect/NVWS/IR/Dialect.h"
 #include "nvidia/include/Dialect/NVWS/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/Transforms/Partition.h"
 #include "triton/Dialect/TritonGPU/Transforms/PartitionBuilder.h"
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
@@ -221,32 +222,70 @@ template <class T> struct AssignStagePhase {
   StagePhase assignArefIndexInBlock(Block *block, StagePhase index) {
     for (auto &op : llvm::make_early_inc_range(*block)) {
       if (auto opT = isValidOp(&op)) {
-        ImplicitLocOpBuilder b(opT.getLoc(), opT);
+        PartitionBuilder b(opT.getLoc(), opT);
+        auto loop = op.getParentOfType<scf::ForOp>();
+        if (!loop) {
+          ImplicitLocOpBuilder b(opT.getLoc(), opT);
 
-        auto nextStage = b.create<arith::AddIOp>(
-            index.stage, b.create<arith::ConstantIntOp>(1, 32));
-        auto arefBuf = opT.getAref()
-                           .template getDefiningOp<nvws::ArefCreateOp>()
-                           .getOperand(0);
-        auto depth = cast<MemDescType>(arefBuf.getType()).getShape().front();
-        if (isa<nvidia_gpu::TensorMemoryScalesEncodingAttr>(
-                cast<MemDescType>(arefBuf.getType()).getEncoding()))
-          depth = 1;
+          auto nextStage = b.create<arith::AddIOp>(
+              index.stage, b.create<arith::ConstantIntOp>(1, 32));
+          auto arefBuf = opT.getAref()
+                             .template getDefiningOp<nvws::ArefCreateOp>()
+                             .getOperand(0);
+          auto depth = cast<MemDescType>(arefBuf.getType()).getShape().front();
 
-        auto cnd =
-            b.create<arith::CmpIOp>(arith::CmpIPredicate::eq, nextStage,
-                                    b.create<arith::ConstantIntOp>(depth, 32));
-        auto zero = b.create<arith::ConstantIntOp>(0, 32);
-        index.stage = b.create<arith::SelectOp>(cnd, zero, nextStage);
+          auto cnd = b.create<arith::CmpIOp>(
+              arith::CmpIPredicate::eq, nextStage,
+              b.create<arith::ConstantIntOp>(depth, 32));
+          auto zero = b.create<arith::ConstantIntOp>(0, 32);
+          index.stage = b.create<arith::SelectOp>(cnd, zero, nextStage);
 
-        auto nextPhase = b.create<arith::XOrIOp>(
-            index.phase, b.create<arith::ConstantIntOp>(1, 32));
-        index.phase = b.create<arith::SelectOp>(cnd, nextPhase, index.phase);
+          auto nextPhase = b.create<arith::XOrIOp>(
+              index.phase, b.create<arith::ConstantIntOp>(1, 32));
+          index.phase = b.create<arith::SelectOp>(cnd, nextPhase, index.phase);
 
-        index.token = opT.getToken();
-        opT.getStageMutable().assign(index.stage);
-        opT->setOperand(2, index.phase);
+          index.token = opT.getToken();
+          opT.getStageMutable().assign(index.stage);
+          opT->setOperand(2, index.phase);
+        } else {
+          auto schedule = WarpSchedule::deserialize(loop);
+          auto partition = schedule->getPartition(opT);
+          assert(partition);
+          auto stageCluster = getStageCluster(opT);
 
+          auto nextStage =
+              b.createInto<arith::AddIOp>(*partition, stageCluster, index.stage,
+                                          b.createInto<arith::ConstantIntOp>(
+                                              *partition, stageCluster, 1, 32));
+          auto arefBuf = opT.getAref()
+                             .template getDefiningOp<nvws::ArefCreateOp>()
+                             .getOperand(0);
+          auto depth = cast<MemDescType>(arefBuf.getType()).getShape().front();
+          if (isa<nvidia_gpu::TensorMemoryScalesEncodingAttr>(
+                  cast<MemDescType>(arefBuf.getType()).getEncoding()))
+            depth = 1;
+
+          auto cnd = b.createInto<arith::CmpIOp>(
+              *partition, stageCluster, arith::CmpIPredicate::eq, nextStage,
+              b.createInto<arith::ConstantIntOp>(*partition, stageCluster,
+                                                 depth, 32));
+
+          auto zero = b.createInto<arith::ConstantIntOp>(*partition,
+                                                         stageCluster, 0, 32);
+          index.stage = b.createInto<arith::SelectOp>(*partition, stageCluster,
+                                                      cnd, zero, nextStage);
+
+          auto nextPhase =
+              b.createInto<arith::XOrIOp>(*partition, stageCluster, index.phase,
+                                          b.createInto<arith::ConstantIntOp>(
+                                              *partition, stageCluster, 1, 32));
+          index.phase = b.createInto<arith::SelectOp>(
+              *partition, stageCluster, cnd, nextPhase, index.phase);
+
+          index.token = opT.getToken();
+          opT.getStageMutable().assign(index.stage);
+          opT->setOperand(2, index.phase);
+        }
       } else if (auto forOp = dyn_cast<scf::ForOp>(op)) {
         assignArefIndexInForOp(forOp, index);
       } else if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
