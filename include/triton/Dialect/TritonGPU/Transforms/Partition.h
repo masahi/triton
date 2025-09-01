@@ -129,7 +129,7 @@ public:
   LLVM_DUMP_METHOD void dump() const;
 
 private:
-  void serializeBlock(mlir::Block* block, mlir::Builder& builder) const;
+  void serializeBlock(mlir::Block* block, mlir::Builder& builder, const Partition* parentPartition=nullptr) const;
 
   // WarpSpecialization tag
   int tag;

@@ -193,20 +193,32 @@ FailureOr<WarpSchedule> WarpSchedule::deserialize(scf::ForOp loop) {
   return result;
 }
 
-void WarpSchedule::serializeBlock(Block *block, Builder &b) const {
+void WarpSchedule::serializeBlock(Block *block, Builder &b, const Partition* parentPartition) const {
   for (Operation &op : block->without_terminator()) {
-    if (auto forOp = dyn_cast<scf::ForOp>(op)) {
-      serializeBlock(forOp.getBody(), b);
-    } else if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
-      serializeBlock(ifOp.thenBlock(), b);
-      if (ifOp.elseBlock()) {
-        serializeBlock(ifOp.elseBlock(), b);
-      }
-    } else if (Partition *partition = opToPartition.lookup(&op)) {
+    if (Partition *partition = opToPartition.lookup(&op)) {
       if (partition == getRootPartition())
         continue;
+
+      if (auto forOp = dyn_cast<scf::ForOp>(op)) {
+        serializeBlock(forOp.getBody(), b, partition);
+      } else if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+        serializeBlock(ifOp.thenBlock(), b, partition);
+        if (ifOp.elseBlock()) {
+          serializeBlock(ifOp.elseBlock(), b, partition);
+        }
+      } else {
+	op.setAttr(kPartitionAttrName,
+		   b.getI32IntegerAttr(partition->getIndex()));
+      }
+    } else if (parentPartition) {
       op.setAttr(kPartitionAttrName,
-                 b.getI32IntegerAttr(partition->getIndex()));
+                 b.getI32IntegerAttr(parentPartition->getIndex()));
+      if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+        serializeBlock(ifOp.thenBlock(), b, parentPartition);
+        if (ifOp.elseBlock()) {
+          serializeBlock(ifOp.elseBlock(), b, parentPartition);
+        }
+      }
     }
   }
 }
