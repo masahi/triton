@@ -56,6 +56,9 @@ void Partition::iterateOutputs(
   for (Operation *op : getOps()) {
     for (OpOperand &use : op->getUses()) {
       Operation *owner = loop.getBody()->findAncestorOpInBlock(*use.getOwner());
+      if (!owner) {
+        continue;
+      }
       auto partitionIds = getPartitionIds(owner);
       if (isa<scf::YieldOp>(owner)) {
         // This value is used in a subsequent iteration.
@@ -88,6 +91,9 @@ void Partition::iterateUses(
   while (!uses.empty()) {
     auto [output, use, distance] = uses.pop_back_val();
     Operation *owner = loop.getBody()->findAncestorOpInBlock(*use->getOwner());
+    if (!owner) {
+      continue;
+    }
     if (!isa<scf::YieldOp>(owner)) {
       callback(output, *use, distance);
       continue;

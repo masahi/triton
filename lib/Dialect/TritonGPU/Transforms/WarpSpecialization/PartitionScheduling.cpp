@@ -154,20 +154,16 @@ static void scheduleUsers(scf::ForOp loop, PartitionSet &partitions,
   }
 }
 
-// Given a partitioning scheme, determine an initial schedule by performing a
-// first-order partition assignment to the operations in the scheme and its
-// users and/or dependencies. This sets up the initial partitioning of the ops.
-static std::optional<PartitionSet> getInitialPartitions(scf::ForOp loop) {
-  // Check for an existing partition set.
-  if (FailureOr<PartitionSet> partitionsOr = PartitionSet::fromLoop(loop);
-      succeeded(partitionsOr))
-    return {std::move(*partitionsOr)};
-  // Start by creating the default partition, a partition for for all loads, and
-  // a partition for all MMAs.
-  PartitionSet partitions;
-  Partition *defaultPartition = partitions.addPartition(0);
-  Partition *mmaPartition = partitions.addPartition(1);
-  Partition *loadPartition = partitions.addPartition(0);
+
+void scheduleInnerLoop(scf::ForOp loop, PartitionSet &partitions,
+                       Partition *defaultPartition, Partition *mmaPartition,
+                       Partition *loadPartition) {
+  for (Operation &op : loop.getOps()) {
+    if (auto innerFor = dyn_cast<scf::ForOp>(op)) {
+      scheduleInnerLoop(innerFor, partitions, defaultPartition, mmaPartition,
+                        loadPartition);
+    }
+  }
 
   // Find loads to pipeline.
   SmallVector<Operation *> loadsAndAllocs;
@@ -237,9 +233,9 @@ static std::optional<PartitionSet> getInitialPartitions(scf::ForOp loop) {
     }
   }
 
-  // If there are no loads or MMAs, don't warp specialize.
-  if (loadsAndAllocs.empty() && mmas.empty())
-    return std::nullopt;
+  if (loadsAndAllocs.empty() && mmas.empty()) {
+    return;
+  }
 
   // Propagate defs of exp.
   for (Operation &op : loop.getOps()) {
@@ -267,6 +263,51 @@ static std::optional<PartitionSet> getInitialPartitions(scf::ForOp loop) {
   for (auto [mmaOp, userPartition] :
        llvm::reverse(llvm::zip(mmas, userPartitions))) {
     scheduleUsers(loop, partitions, userPartition, mmaOp);
+  }
+
+  SetVector<Partition *> bodyPartitons;
+  for (Operation &op : loop.getOps()) {
+    if (hasPartition(&op)) {
+      bodyPartitons.insert(partitions.getPartition(&op));
+    }
+  }
+
+  setPartition(loop, bodyPartitons);
+}
+
+// Given a partitioning scheme, determine an initial schedule by performing a
+// first-order partition assignment to the operations in the scheme and its
+// users and/or dependencies. This sets up the initial partitioning of the ops.
+static std::optional<PartitionSet> getInitialPartitions(scf::ForOp loop) {
+  // Check for an existing partition set.
+  if (FailureOr<PartitionSet> partitionsOr = PartitionSet::fromLoop(loop);
+      succeeded(partitionsOr))
+    return {std::move(*partitionsOr)};
+  // Start by creating the default partition, a partition for for all loads, and
+  // a partition for all MMAs.
+  PartitionSet partitions;
+  Partition *defaultPartition = partitions.addPartition(0);
+  Partition *mmaPartition = partitions.addPartition(1);
+  Partition *loadPartition = partitions.addPartition(0);
+
+  for (Operation &op : loop.getOps()) {
+    if (auto innerFor = dyn_cast<scf::ForOp>(op)) {
+      scheduleInnerLoop(innerFor, partitions, defaultPartition, mmaPartition,
+                        loadPartition);
+    } else if (isa<ttng::TMEMAllocOp, ttng::TMEMStoreOp>(op)) {
+      // TODO: get rid of tmem store that init accum
+      SetVector<Partition *> tmemPartitions;
+      tmemPartitions.insert(defaultPartition);
+      tmemPartitions.insert(mmaPartition);
+      setPartition(&op, tmemPartitions);
+    } else if (isa<ttng::TMEMLoadOp>(op)) {
+      setPartition(&op, defaultPartition);
+    }
+  }
+
+  // If there are no loads or MMAs, don't warp specialize.
+  if (loadPartition->empty() && mmaPartition->empty()) {
+    return std::nullopt;
   }
 
   return partitions;
@@ -331,6 +372,12 @@ struct OpClusters : public llvm::MapVector<Operation *, OpCluster *> {
 // forming contiguous clusters from the unassigned operations and then deciding
 // what to do with the operations in that cluster.
 void propagatePartitions(scf::ForOp loop, PartitionSet &partitions) {
+  for (Operation &op : loop.getOps()) {
+    if (auto innerFor = dyn_cast<scf::ForOp>(op)) {
+      propagatePartitions(innerFor, partitions);
+    }
+  }
+
   OpClusters opClusters;
 
   for (Partition &partition : partitions.getPartitions()) {
@@ -517,6 +564,12 @@ void rematerializeBroadcasts(PartitionSet &partitions, OpOperand *use) {
 }
 
 void optimizePartitions(scf::ForOp loop, PartitionSet &partitions) {
+  for (Operation &op : loop.getOps()) {
+    if (auto innerFor = dyn_cast<scf::ForOp>(op)) {
+      optimizePartitions(innerFor, partitions);
+    }
+  }
+
   for (Partition &partition : partitions.getPartitions()) {
     SmallVector<OpOperand *> uses;
     partition.iterateOutputs(loop, [&](Operation *defOp, OpOperand &use) {

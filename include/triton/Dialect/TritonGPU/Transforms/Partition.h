@@ -39,6 +39,7 @@ public:
   ArrayRef<Operation *> getOps() const { return ops; }
   void addOp(Operation *op) { ops.push_back(op); }
   bool hasOp(Operation *op) const;
+  bool empty() const { return ops.empty(); }
 
   // Iterate the inputs of the partition. Input values are those that originate
   // from a different partition or a previous iteration of the current

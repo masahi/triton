@@ -46,7 +46,7 @@ bool samePartition(Operation *op1, Operation *op2) {
   return *part1 == *part2;
 }
 
-SmallVector<ProducedValueInfo> getProducedValues(Operation *op, Block *loopBody,
+SmallVector<ProducedValueInfo> getProducedValues(Operation *op,
                                                  PartitionSet &partitions) {
   SmallVector<ProducedValueInfo> producedValues;
   auto partitionIds = getPartitionIds(op);
@@ -64,8 +64,9 @@ SmallVector<ProducedValueInfo> getProducedValues(Operation *op, Block *loopBody,
 template <typename AllocOp, typename LoadOp>
 std::optional<std::pair<AllocOp, LoadOp>> isLoadAndAlloc(Value result) {
   auto alloc = result.getDefiningOp<AllocOp>();
-  if (!alloc)
+  if (!alloc || !alloc.getSrc()) {
     return std::nullopt;
+  }
   if (auto load = alloc.getSrc().template getDefiningOp<LoadOp>();
       *getPartitionIds(alloc) == *getPartitionIds(load)) {
     // if alloc and load are in different partitions, they are treated as two
@@ -85,7 +86,8 @@ template <typename AllocOp> auto isGlobalLoadAndAlloc(Value result) {
   return isLoadAndAlloc<AllocOp, triton::LoadOp>(result);
 }
 
-ArefCreateOp createAref(OpBuilder &builder, ProducedValueInfo &producedValue) {
+ArefCreateOp createAref(OpBuilder &builder, ProducedValueInfo &producedValue,
+                        const SetVector<Partition *> partitions) {
   auto result = producedValue.result;
 
   auto getSmemDescType = [](Value tensorResult) {
@@ -127,7 +129,11 @@ ArefCreateOp createAref(OpBuilder &builder, ProducedValueInfo &producedValue) {
   assert(isa<SharedMemorySpaceAttr>(arefBufType.getMemorySpace()));
   auto loc = result.getLoc();
   auto alloc = triton::nvws::createAlloc(builder, loc, arefBufType, Value());
-  return createArefCreateOp(builder, {arefBufType}, {alloc->getResult(0)}, loc);
+  auto aref =
+      createArefCreateOp(builder, {arefBufType}, {alloc->getResult(0)}, loc);
+  setPartition(alloc, partitions);
+  setPartition(aref, partitions);
+  return aref;
 }
 
 int getTxCount(Operation *descOp) {
@@ -445,7 +451,12 @@ bool insertArefs(PartitionBuilder &builder, scf::ForOp loop,
   {
     OpBuilder::InsertionGuard g(builder);
     builder.setInsertionPoint(loop);
-    aref = createAref(builder, producedValue);
+    SetVector<Partition *> arefPartitions;
+    arefPartitions.insert(producedValue.partition);
+    for (auto consumerPartition : llvm::make_first_range(resultsPerPartition)) {
+      arefPartitions.insert(consumerPartition);
+    }
+    aref = createAref(builder, producedValue, arefPartitions);
   }
 
   auto tag = "aref_" + std::to_string(arefTag);
@@ -505,12 +516,12 @@ public:
         });
 
         for (auto op : ops) {
-          auto producedValues =
-              getProducedValues(op, loop.getBody(), *partitions);
+          auto producedValues = getProducedValues(op, *partitions);
           for (auto producedValue : producedValues) {
             PartitionBuilder builder(op->getLoc(), op);
             builder.setInsertionPoint(op);
-            if (insertArefs(builder, loop, *partitions, producedValue, arefTag))
+            if (insertArefs(builder, op->getParentOfType<scf::ForOp>(),
+                            *partitions, producedValue, arefTag))
               arefTag++;
           }
         }
