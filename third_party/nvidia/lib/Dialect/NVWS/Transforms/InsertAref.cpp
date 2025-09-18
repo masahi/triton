@@ -131,8 +131,8 @@ ArefCreateOp createAref(OpBuilder &builder, ProducedValueInfo &producedValue,
   auto alloc = triton::nvws::createAlloc(builder, loc, arefBufType, Value());
   auto aref =
       createArefCreateOp(builder, {arefBufType}, {alloc->getResult(0)}, loc);
-  setPartition(alloc, partitions);
-  setPartition(aref, partitions);
+  // setPartition(alloc, partitions);
+  // setPartition(aref, partitions);
   return aref;
 }
 
@@ -450,7 +450,11 @@ bool insertArefs(PartitionBuilder &builder, scf::ForOp loop,
   ArefCreateOp aref;
   {
     OpBuilder::InsertionGuard g(builder);
-    builder.setInsertionPoint(loop);
+    scf::ForOp topLevelFor = loop;
+    while (auto outer = topLevelFor->getParentOfType<scf::ForOp>()) {
+      topLevelFor = outer;
+    }
+    builder.setInsertionPoint(topLevelFor);
     SetVector<Partition *> arefPartitions;
     arefPartitions.insert(producedValue.partition);
     for (auto consumerPartition : llvm::make_first_range(resultsPerPartition)) {
@@ -520,7 +524,7 @@ public:
           for (auto producedValue : producedValues) {
             PartitionBuilder builder(op->getLoc(), op);
             builder.setInsertionPoint(op);
-            if (insertArefs(builder, op->getParentOfType<scf::ForOp>(),
+            if (insertArefs(builder, loop,
                             *partitions, producedValue, arefTag))
               arefTag++;
           }

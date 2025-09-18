@@ -290,19 +290,21 @@ static std::optional<PartitionSet> getInitialPartitions(scf::ForOp loop) {
   Partition *mmaPartition = partitions.addPartition(1);
   Partition *loadPartition = partitions.addPartition(0);
 
+  SmallVector<Operation*> toHoist;
   for (Operation &op : loop.getOps()) {
     if (auto innerFor = dyn_cast<scf::ForOp>(op)) {
       scheduleInnerLoop(innerFor, partitions, defaultPartition, mmaPartition,
                         loadPartition);
     } else if (isa<ttng::TMEMAllocOp, ttng::TMEMStoreOp>(op)) {
-      // TODO: get rid of tmem store that init accum
-      SetVector<Partition *> tmemPartitions;
-      tmemPartitions.insert(defaultPartition);
-      tmemPartitions.insert(mmaPartition);
-      setPartition(&op, tmemPartitions);
+      // TODO, fix hoisting pass
+      toHoist.push_back(&op);
     } else if (isa<ttng::TMEMLoadOp>(op)) {
       setPartition(&op, defaultPartition);
     }
+  }
+
+  for (auto op: toHoist) {
+    op->moveBefore(loop);
   }
 
   // If there are no loads or MMAs, don't warp specialize.
