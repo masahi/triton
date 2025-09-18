@@ -272,7 +272,7 @@ void scheduleInnerLoop(scf::ForOp loop, PartitionSet &partitions,
     }
   }
 
-  setPartition(loop, bodyPartitons);
+  //  setPartition(loop, bodyPartitons);
 }
 
 // Given a partitioning scheme, determine an initial schedule by performing a
