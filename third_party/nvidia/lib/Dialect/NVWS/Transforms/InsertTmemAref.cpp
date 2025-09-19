@@ -584,6 +584,7 @@ LogicalResult insertTmemAref(TmemAccessDag &accessDag) {
                                    allocOp.getLoc());
 
   auto stageCluster = getStageCluster(allocOp);
+  // TODO: partitionId shouldn't be null for nested loops
   auto partitionId = accessDag.getRootNode()->partitionId;
 
   TMEMAref state(
@@ -655,7 +656,6 @@ public:
         return WalkResult::interrupt();
       return WalkResult::advance();
     });
-    getOperation().dump();
   }
 };
 

@@ -227,7 +227,7 @@ template <class T> struct AssignStagePhase {
           using ty = decltype(opTy);
           auto ids = partitionIds;
           if (ids) {
-            ids->insert(0);
+	    // ids->insert(0);
           }
           return triton::gpu::createInto<ty>(
               builder, builder.getLoc(), ids, stageCluster,

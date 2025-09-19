@@ -478,14 +478,15 @@ void propagatePartitions(scf::ForOp loop, PartitionSet &partitions) {
     assert(llvm::all_of(cluster.ops,
                         [&](Operation *op) { return !hasPartition(op); }));
 
-    // If there are multiple def or sink partitions, don't know what to do.
-    // Assign the whole cluster to its own partition.
-    if (cluster.defPartitions.size() > 1 || cluster.sinkPartitions.size() > 1) {
-      Partition *newPartition = partitions.addPartition(0);
-      for (Operation *op : cluster.ops)
-        setPartition(op, newPartition);
-      continue;
-    }
+    // TODO
+    // // If there are multiple def or sink partitions, don't know what to do.
+    // // Assign the whole cluster to its own partition.
+    // if (cluster.defPartitions.size() > 1 || cluster.sinkPartitions.size() > 1) {
+    //   Partition *newPartition = partitions.addPartition(0);
+    //   for (Operation *op : cluster.ops)
+    //     setPartition(op, newPartition);
+    //   continue;
+    // }
 
     // If there is no sink partition, this means there is a backedge somewhere,
     // for now assign the cluster to the def partition.
