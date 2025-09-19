@@ -42,6 +42,9 @@ std::optional<int> getPartitionId(Operation *op) {
   auto partitionIds = getPartitionIds(op);
   if (!partitionIds)
     return std::nullopt;
+  if (partitionIds->size() != 1) {
+    return std::nullopt;
+  }
   assert(partitionIds->size() == 1);
   return *partitionIds->begin();
 }
@@ -603,7 +606,7 @@ LogicalResult insertTmemAref(TmemAccessDag &accessDag) {
 
   auto node = insertTmemArefImpl(rootNode->user.get(), partitionId, state);
 
-  if (outerWsLoop) {
+  if (true) {
     // aref is only used inside ws-loop, so we use the last op to insert
     // matching exit
     partitionId = node->partitionId;
@@ -652,6 +655,7 @@ public:
         return WalkResult::interrupt();
       return WalkResult::advance();
     });
+    getOperation().dump();
   }
 };
 

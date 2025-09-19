@@ -303,9 +303,9 @@ static std::optional<PartitionSet> getInitialPartitions(scf::ForOp loop) {
     }
   }
 
-  for (auto op: toHoist) {
-    op->moveBefore(loop);
-  }
+  // for (auto op: toHoist) {
+  //   op->moveBefore(loop);
+  // }
 
   // If there are no loads or MMAs, don't warp specialize.
   if (loadPartition->empty() && mmaPartition->empty()) {
