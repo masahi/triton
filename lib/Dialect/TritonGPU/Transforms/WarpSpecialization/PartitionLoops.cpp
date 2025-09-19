@@ -99,6 +99,8 @@ SmallVector<LoopVarCategory> classifyLoopVars(scf::ForOp loop,
                                               const PartitionSet &partitions) {
   auto inPartition = [&](OpOperand &opnd) {
     auto op = opnd.getOwner();
+    if (isa<scf::ForOp>(op)) {
+    }
     auto partitionIds = getPartitionIds(op, partitions.getNumPartitions());
     if (auto ifOp = dyn_cast<scf::IfOp>(op->getParentOp());
         ifOp && isa<scf::YieldOp>(op)) {
@@ -372,43 +374,43 @@ LogicalResult triton::gpu::partitionLoop(scf::ForOp loop) {
     return failure();
   PartitionSet partitions = std::move(*partitionsOr);
 
-  // Only the root node should have consumers at this point.
-  for (const Partition &partition : partitions.getPartitions()) {
-    bool failed = false;
-    auto callback = [&](OpResult output, OpOperand &use, unsigned distance) {
-      if (partitions.isInRootPartition(output.getDefiningOp())) {
-        return;
-      }
-      auto partitionIds = getPartitionIds(use.getOwner());
-      if (partitions.isInRootPartition(use.getOwner()) ||
-          llvm::is_contained(*partitionIds, partition.getIndex()))
-        return;
+  // // Only the root node should have consumers at this point.
+  // for (const Partition &partition : partitions.getPartitions()) {
+  //   bool failed = false;
+  //   auto callback = [&](OpResult output, OpOperand &use, unsigned distance) {
+  //     if (partitions.isInRootPartition(output.getDefiningOp())) {
+  //       return;
+  //     }
+  //     auto partitionIds = getPartitionIds(use.getOwner());
+  //     if (partitions.isInRootPartition(use.getOwner()) ||
+  //         llvm::is_contained(*partitionIds, partition.getIndex()))
+  //       return;
 
-      // check if consumer partition set is a subset of the producer partitions
-      auto defOpPartitionIds = getPartitionIds(output.getDefiningOp());
-      bool isValidSubset = std::all_of(
-          partitionIds->begin(), partitionIds->end(), [&](int consumerId) {
-            return llvm::is_contained(*defOpPartitionIds, consumerId);
-          });
+  //     // check if consumer partition set is a subset of the producer partitions
+  //     auto defOpPartitionIds = getPartitionIds(output.getDefiningOp());
+  //     bool isValidSubset = std::all_of(
+  //         partitionIds->begin(), partitionIds->end(), [&](int consumerId) {
+  //           return llvm::is_contained(*defOpPartitionIds, consumerId);
+  //         });
 
-      if (isValidSubset)
-        return; // Valid: consumer ⊆ producer
+  //     if (isValidSubset)
+  //       return; // Valid: consumer ⊆ producer
 
-      failed = true;
-      InFlightDiagnostic diag =
-          mlir::emitWarning(output.getLoc(), "non-root partition #")
-          << partition.getIndex() << " has direct SSA consumer";
+  //     failed = true;
+  //     InFlightDiagnostic diag =
+  //         mlir::emitWarning(output.getLoc(), "non-root partition #")
+  //         << partition.getIndex() << " has direct SSA consumer";
 
-      for (auto partitionId : *partitionIds) {
-        diag.attachNote(use.getOwner()->getLoc())
-            << "use at distance " << distance << " in partition #"
-            << partitionId << " here";
-      }
-    };
-    partition.iterateUses(loop, callback);
-    if (failed)
-      return failure();
-  }
+  //     for (auto partitionId : *partitionIds) {
+  //       diag.attachNote(use.getOwner()->getLoc())
+  //           << "use at distance " << distance << " in partition #"
+  //           << partitionId << " here";
+  //     }
+  //   };
+  //   partition.iterateUses(loop, callback);
+  //   if (failed)
+  //     return failure();
+  // }
 
   // There is nothing to do if the loop has 1 or fewer partitions.
   if (llvm::size(partitions.getPartitions()) <= 1)
@@ -515,8 +517,9 @@ LogicalResult triton::gpu::partitionLoop(scf::ForOp loop) {
     }
   }
 
-  for (auto op : llvm::reverse(opsToErase))
-    op->erase();
+  loop->getParentOfType<ModuleOp>().dump();
+  // for (auto op : llvm::reverse(opsToErase))
+  //   op->erase();
 
   return success();
 }
@@ -590,6 +593,47 @@ LogicalResult inferReduceOpPartitions(triton::ReduceOp reduceOp) {
   return success();
 }
 
+// Assume that inner loops have already been processed
+LogicalResult inferForOpPartitions(scf::ForOp forOp) {
+  SetVector<int> forOpPartitions;
+  for (auto &op : forOp.getBody()->without_terminator()) {
+    auto opPartitions = getPartitionIds(&op);
+    forOpPartitions.insert(opPartitions->begin(), opPartitions->end());
+  }
+  setPartition(forOp, forOpPartitions);
+
+  SmallVector<SetVector<int>> iterArgsPartitions(forOp.getNumRegionIterArgs());
+  for (auto [i, arg] : llvm::enumerate(forOp.getRegionIterArgs())) {
+    for (auto &use : arg.getUses()) {
+      if (auto inner = dyn_cast<scf::ForOp>(use.getOwner())) {
+        auto innerIterArgsPartitions =
+            inner->getAttrOfType<ArrayAttr>(kPartitionOutputsAttrName);
+        assert(innerIterArgsPartitions);
+        auto partitions =
+            cast<DenseI32ArrayAttr>(
+                innerIterArgsPartitions[use.getOperandNumber() - 3])
+                .asArrayRef();
+        iterArgsPartitions[i].insert(partitions.begin(), partitions.end());
+      } else {
+        auto userPartitions = getPartitionIds(use.getOwner());
+        assert(userPartitions);
+        iterArgsPartitions[i].insert(userPartitions->begin(),
+                                     userPartitions->end());
+      }
+    }
+  }
+
+  llvm::SmallVector<Attribute> partitionAttrs;
+  for (auto [idx, partition] : llvm::enumerate(iterArgsPartitions)) {
+    ArrayRef<int> ids(partition.begin(), partition.end());
+    OpBuilder b(forOp);
+    partitionAttrs.push_back(b.getDenseI32ArrayAttr(ids));
+  }
+  forOp->setAttr(kPartitionOutputsAttrName,
+                 ArrayAttr::get(forOp.getContext(), partitionAttrs));
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // Pass Definition
 //===----------------------------------------------------------------------===//
@@ -626,7 +670,11 @@ void PartitionLoops::runOnOperation() {
       if (failed(inferIfStmtPartitions(ifOp)))
         signalPassFailure();
     });
-    if (failed(partitionLoop(loop)))
-      return signalPassFailure();
+    loop.walk([&](scf::ForOp forOp) {
+      if (failed(inferForOpPartitions(forOp)))
+        signalPassFailure();
+    });
+    // if (failed(partitionLoop(loop)))
+    //   return signalPassFailure();
   }
 }

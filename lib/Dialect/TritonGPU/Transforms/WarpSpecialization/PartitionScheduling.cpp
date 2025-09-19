@@ -656,6 +656,7 @@ void PartitionScheduling::runOnOperation() {
   });
   for (auto [idx, loop] : llvm::enumerate(loops)) {
     if (std::optional<PartitionSet> partitions = getInitialPartitions(loop)) {
+      // TODO: propagatePartitions is broken
       propagatePartitions(loop, *partitions);
       optimizePartitions(loop, *partitions);
       assignRootPartition(loop, *partitions);
