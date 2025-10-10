@@ -172,8 +172,8 @@ static std::optional<PartitionSet> getInitialPartitions(scf::ForOp loop) {
   // Find loads to pipeline.
   SmallVector<Operation *> loadsAndAllocs;
   for (Operation &op : loop.getOps()) {
-    // Only TMA loads are supported at the moment.
-    if (!isa<DescriptorLoadOp, DescriptorGatherOp>(op))
+    // TODO: Not all tt.load should be lowered to cpasync
+    if (!isa<LoadOp, DescriptorLoadOp, DescriptorGatherOp>(op))
       continue;
     setPartition(&op, loadPartition);
     loadsAndAllocs.push_back(&op);
