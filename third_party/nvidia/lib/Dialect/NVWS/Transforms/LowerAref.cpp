@@ -163,8 +163,14 @@ BarrierCount getArrivalCount(ArefCreateOp op) {
           count.consumerPendingCount += 1;
           break;
         case AsyncOp::CpAsync:
-          // TODO
-          assert(false);
+          // We cannot use an arrivial count which depends on `num_warps`.
+          // We use the no-noinc variant of AsyncCopyMbarrierArriveOp and an
+          // additional ArriveBarrierOp op which is single threaded in Triton.
+          //   mbarrier.init %mbar, 1
+          //   cp.async
+          //   cp.async.mbarrier.arrive %mbar
+          //   mbarrier.arrive %mbar
+          count.consumerPendingCount += 1;
           break;
         default:
           llvm_unreachable("unsupported producer kind");
@@ -457,9 +463,14 @@ void insertArriveBarrier(Location loc, ArrayRef<AsyncOp> asyncOps,
     case AsyncOp::TMALoad:
       // nothing to do, the arrive is done by HW
       break;
-    case AsyncOp::CpAsync:
-      arriveOp = rewriter.create<nvidia_gpu::AsyncCopyMbarrierArriveOp>(
-          loc, mbar, /*increment*/ true);
+    case AsyncOp::CpAsync: {
+      auto cpasyncArrive =
+          rewriter.create<nvidia_gpu::AsyncCopyMbarrierArriveOp>(
+              loc, mbar, /*increment*/ true);
+      assignStageCluster(cpasyncArrive, partitionIds, stageCluster, rewriter);
+      arriveOp = rewriter.create<nvidia_gpu::ArriveBarrierOp>(loc, mbar, 1);
+      break;
+    }
     default:
       llvm_unreachable("unknown async op");
     }
