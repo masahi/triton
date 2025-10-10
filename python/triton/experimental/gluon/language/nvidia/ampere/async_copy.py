@@ -40,16 +40,18 @@ def async_copy_global_to_shared(smem, pointer, mask=None, cache_modifier="", evi
 
 
 @builtin
-def mbarrier_arrive(mbarrier, increment_count=True, _semantic=None):
+def mbarrier_arrive(mbarrier, increment_count=True, pred=True, _semantic=None):
     """
     Arrive on the mbarrier once all outstanding async copies are complete.
 
     Args:
         mbarrier (shared_memory_descriptor): Barrier object to arrive on.
         increment_count (bool): Whether to increment the arrival count. Defaults to True.
+        pred (bool): Scalar predicate. Operation is skipped if predicate is False. Defaults to True.
     """
     increment_count = _unwrap_if_constexpr(increment_count)
-    _semantic.builder.create_async_copy_mbarrier_arrive(mbarrier.handle, increment_count)
+    pred = _semantic.to_tensor(pred)
+    _semantic.builder.create_async_copy_mbarrier_arrive(mbarrier.handle, increment_count, pred.handle)
 
 
 @builtin
