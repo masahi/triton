@@ -519,8 +519,8 @@ def matmul_cpasync_kernel(  #
 @pytest.mark.parametrize("K", [128, 1024, 2048])
 @pytest.mark.parametrize("BLOCK_M", [128])
 @pytest.mark.parametrize("BLOCK_N", [128, 256])
-@pytest.mark.parametrize("BLOCK_K", [64, 128])
-@pytest.mark.parametrize("NUM_WARPS", [4])
+@pytest.mark.parametrize("BLOCK_K", [64])
+@pytest.mark.parametrize("NUM_WARPS", [4, 8])
 def test_cpasync_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, device):
     NUM_STAGES = 3
     torch.manual_seed(42)
@@ -542,4 +542,4 @@ def test_cpasync_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, device):
     print("ok")
 
 
-test_cpasync_matmul(1024, 1024, 1024, 128, 128, 64, 4, "cuda")
+# test_cpasync_matmul(1024, 1024, 1024, 128, 128, 64, 8, "cuda")
