@@ -162,6 +162,10 @@ BarrierCount getArrivalCount(ArefCreateOp op) {
         case AsyncOp::NONE:
           count.consumerPendingCount += 1;
           break;
+        case AsyncOp::CpAsync:
+          // TODO
+          assert(false);
+          break;
         default:
           llvm_unreachable("unsupported producer kind");
         }
@@ -454,6 +458,8 @@ void insertArriveBarrier(Location loc, ArrayRef<AsyncOp> asyncOps,
       // nothing to do, the arrive is done by HW
       break;
     case AsyncOp::CpAsync:
+      arriveOp = rewriter.create<nvidia_gpu::AsyncCopyMbarrierArriveOp>(
+          loc, mbar, /*increment*/ true);
     default:
       llvm_unreachable("unknown async op");
     }
