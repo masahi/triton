@@ -170,6 +170,16 @@ void createNVWSDescriptorLoadOp(OpBuilder &builder, Operation *ttDescLoadOp,
   }
 }
 
+void createAsyncCopyGlobalToLocalOp(OpBuilder &builder, LoadOp loadOp,
+                                    Value dataBuf, Partition *producerPartition,
+                                    PartitionSet &partitions, Location loc) {
+  auto newLoad = builder.create<AsyncCopyGlobalToLocalOp>(
+      loc, loadOp.getPtr(), dataBuf, loadOp.getMask(), loadOp.getOther(),
+      loadOp.getCache(), loadOp.getEvict(), loadOp.getIsVolatile());
+  newLoad->setAttrs(loadOp->getAttrs());
+  setPartition(loadOp, producerPartition);
+}
+
 StageCluster getStageClusterForProducer(Value producedValue) {
   if (auto opt = isDescLoadAndAlloc<LocalAllocOp>(producedValue)) {
     return getStageCluster(opt->second);
@@ -215,9 +225,19 @@ SmallVector<Operation *> createArefPut(PartitionBuilder &builder,
                                partitions, loc);
     producerKind = AsyncOp::TMALoad;
     staleOps.push_back(descOp);
-  } else if (isGlobalLoadAndAlloc<LocalAllocOp>(result) ||
-             isGlobalLoadAndAlloc<TMEMAllocOp>(result)) {
-    llvm_unreachable("cpasync not supported yet");
+  } else if (auto opt = isGlobalLoadAndAlloc<LocalAllocOp>(result)) {
+    auto [alloc, loadOp] = *opt;
+    createAsyncCopyGlobalToLocalOp(builder, loadOp, dataBuf, producerPartition,
+                                   partitions, loc);
+    producerKind = AsyncOp::CpAsync;
+    staleOps.push_back(alloc);
+    staleOps.push_back(loadOp);
+  } else if (auto opt = isGlobalLoadAndAlloc<TMEMAllocOp>(result)) {
+    auto loadOp = opt->second;
+    createAsyncCopyGlobalToLocalOp(builder, loadOp, dataBuf, producerPartition,
+                                   partitions, loc);
+    producerKind = AsyncOp::CpAsync;
+    staleOps.push_back(loadOp);
   } else if (auto alloc = result.getDefiningOp<LocalAllocOp>()) {
     builder.createInto<LocalStoreOp>(*producerPartition, stageCluster,
                                      alloc.getSrc(), dataBuf);
@@ -229,7 +249,10 @@ SmallVector<Operation *> createArefPut(PartitionBuilder &builder,
       producerKind = AsyncOp::TMALoad;
       staleOps.push_back(descOp);
     } else if (auto loadOp = result.getDefiningOp<triton::LoadOp>()) {
-      llvm_unreachable("cpasync not supported yet");
+      createAsyncCopyGlobalToLocalOp(builder, loadOp, dataBuf,
+                                     producerPartition, partitions, loc);
+      producerKind = AsyncOp::CpAsync;
+      staleOps.push_back(loadOp);
     } else {
       // Create LocalStore of result into dataBuf. This is a value aref, not
       // supported for now.
