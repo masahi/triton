@@ -173,6 +173,7 @@ static std::optional<PartitionSet> getInitialPartitions(scf::ForOp loop) {
   SmallVector<Operation *> loadsAndAllocs;
   for (Operation &op : loop.getOps()) {
     // TODO: Not all tt.load should be lowered to cpasync
+    // Use canBeConvertedToAsyncLoad
     if (!isa<LoadOp, DescriptorLoadOp, DescriptorGatherOp>(op))
       continue;
     setPartition(&op, loadPartition);
