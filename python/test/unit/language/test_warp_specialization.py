@@ -497,7 +497,7 @@ def matmul_cpasync_kernel(  #
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for _ in tl.range(0, tl.cdiv(K, BLOCK_K)):
+    for _ in tl.range(0, tl.cdiv(K, BLOCK_K), warp_specialize=True):
         a = tl.load(a_ptrs)
         b = tl.load(b_ptrs)
         accumulator = tl.dot(a, b, acc=accumulator)
@@ -534,8 +534,12 @@ def test_cpasync_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, device):
 
     k = matmul_cpasync_kernel[grid](a, b, bias, output, M, N, K, a.stride(0), a.stride(1), b.stride(0), b.stride(1), output.stride(0),
                                     output.stride(1), BLOCK_M, BLOCK_N, BLOCK_K, num_stages=NUM_STAGES, num_warps=NUM_WARPS)
-    print(k.asm["ttgir"])
+#    print(k.asm["ptx"])
 
     ref_out = torch.empty((M, N), dtype=dtype_dst, device=device)
-    cublas.matmul(a, b.T.transpose(), ref_out)
+    cublas.matmul(a, b.T.contiguous(), ref_out)
     torch.testing.assert_close(ref_out.to(torch.float16), output.to(torch.float16), atol=0.03, rtol=0.03)
+    print("ok")
+
+
+test_cpasync_matmul(1024, 1024, 1024, 128, 128, 64, 4, "cuda")
