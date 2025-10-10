@@ -466,7 +466,7 @@ void insertArriveBarrier(Location loc, ArrayRef<AsyncOp> asyncOps,
     case AsyncOp::CpAsync: {
       auto cpasyncArrive =
           rewriter.create<nvidia_gpu::AsyncCopyMbarrierArriveOp>(
-              loc, mbar, /*increment*/ true);
+              loc, mbar, /*noIncrement*/ false);
       assignStageCluster(cpasyncArrive, partitionIds, stageCluster, rewriter);
       arriveOp = rewriter.create<nvidia_gpu::ArriveBarrierOp>(loc, mbar, 1);
       break;
@@ -645,7 +645,8 @@ bool isProducerLoad(ArefCreateOp arefOp) {
   for (auto user : arefOp.getResult().getUsers()) {
     if (auto putOp = dyn_cast<ArefPutEnterOp>(user)) {
       if (llvm::any_of(putOp->getUsers(), [](auto user) {
-            return isa<triton::nvws::DescriptorLoadOpInterface>(user);
+            return isa<AsyncCopyGlobalToLocalOp,
+                       triton::nvws::DescriptorLoadOpInterface>(user);
           })) {
         return true;
       }

@@ -122,7 +122,7 @@ SmallVector<LoopVarCategory> classifyLoopVars(scf::ForOp loop,
   for (auto [i, arg] : llvm::enumerate(loop.getRegionIterArgs())) {
     if (llvm::any_of(arg.getUses(), inPartition)) {
       categories[i] = LoopVarCategory::Used;
-    } else if (isTensorResultFromOtherPartition(i)) {
+    } else if (isTensorResultFromOtherPartition(i) && !loop.getResult(i).use_empty()) {
       categories[i] = LoopVarCategory::TensorResultFromOtherPartition;
     } else {
       categories[i] = LoopVarCategory::Unused;
