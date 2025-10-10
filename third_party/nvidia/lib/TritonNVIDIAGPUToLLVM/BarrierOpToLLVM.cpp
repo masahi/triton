@@ -226,6 +226,22 @@ struct WaitBarrierOpConversion
   }
 };
 
+void emitBarrier(std::string instr, Value barrierAlloc, Value pred,
+                 MLIRContext *ctx, ConversionPatternRewriter &rewriter,
+                 Location loc) {
+  ::mlir::triton::PTXBuilder ptxBuilder;
+  SmallVector<PTXBuilder::Operand *, 2> operands;
+  if (pred) {
+    operands.push_back(ptxBuilder.newOperand(pred, "b"));
+  }
+  operands.push_back(ptxBuilder.newOperand(barrierAlloc, "r"));
+
+  auto &arriveOp = *ptxBuilder.create<>(instr);
+  arriveOp(operands, /*onlyAttachMLIRArgs=*/true);
+  auto voidTy = void_ty(ctx);
+  ptxBuilder.launch(rewriter, loc, voidTy);
+}
+
 struct ArriveBarrierOpConversion
     : public ConvertOpToLLVMPattern<triton::nvidia_gpu::ArriveBarrierOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -247,20 +263,38 @@ struct ArriveBarrierOpConversion
     if (op.getPred())
       pred = b.and_(pred, adaptor.getPred());
 
-    PTXBuilder ptxBuilder;
-    SmallVector<PTXBuilder::Operand *, 2> operands = {
-        ptxBuilder.newOperand(pred, "b"),
-        ptxBuilder.newOperand(adaptor.getAlloc(), "r")};
-
-    auto arriveOp = *ptxBuilder.create(ptxAsm.str());
-    arriveOp(operands, /*onlyAttachMLIRArgs=*/true);
-    auto voidTy = void_ty(getContext());
-    ptxBuilder.launch(rewriter, op.getLoc(), voidTy);
+    emitBarrier(ptxAsm.str(), adaptor.getAlloc(), pred, getContext(), rewriter,
+                op.getLoc());
 
     rewriter.eraseOp(op);
     return success();
   }
 };
+
+struct AsyncCopyMbarrierArriveOpConversion
+    : public ConvertOpToLLVMPattern<
+          triton::nvidia_gpu::AsyncCopyMbarrierArriveOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(triton::nvidia_gpu::AsyncCopyMbarrierArriveOp op,
+                  OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    // rewriter.create<NVVM::CpAsyncCommitGroupOp>(loc);
+    // rewriter.create<NVVM::CpAsyncWaitGroupOp>(loc, 0);
+    std::string noinc = op.getNoIncrement() ? ".noinc" : "";
+    std::string instr = "cp.async.mbarrier.arrive" + noinc + ".shared.b64";
+    std::string ptx = op.getPred() ? "@$0 " + instr + " [$1];" : instr + " [$0];";
+
+    emitBarrier(ptx, adaptor.getBarrier(), adaptor.getPred(), getContext(),
+                rewriter, op.getLoc());
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void mlir::triton::NVIDIA::populateBarrierOpToLLVMPatterns(
@@ -271,5 +305,6 @@ void mlir::triton::NVIDIA::populateBarrierOpToLLVMPatterns(
                                                                   benefit);
   patterns.add<WaitBarrierOpConversion>(typeConverter, benefit, targetInfo);
   patterns.add<BarrierExpectConversion>(typeConverter, benefit);
-  patterns.add<ArriveBarrierOpConversion>(typeConverter, benefit);
+  patterns.add<ArriveBarrierOpConversion, AsyncCopyMbarrierArriveOpConversion>(
+      typeConverter, benefit);
 }

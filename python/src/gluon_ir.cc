@@ -565,9 +565,10 @@ void init_gluon_ir(py::module &&m) {
                  isVolatile);
            })
       .def("create_async_copy_mbarrier_arrive",
-           [](GluonOpBuilder &self, Value mbarrier, bool incrementCount) {
+           [](GluonOpBuilder &self, Value mbarrier, bool incrementCount, Value pred) {
              self.create<ttng::AsyncCopyMbarrierArriveOp>(mbarrier,
-                                                          !incrementCount);
+                                                          !incrementCount,
+							  pred);
            })
       .def("create_async_commit_group",
            [](GluonOpBuilder &self) {

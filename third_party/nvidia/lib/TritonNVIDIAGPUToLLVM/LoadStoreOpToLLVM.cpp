@@ -1788,28 +1788,6 @@ LogicalResult AsyncTMAScatterOpConversion::matchAndRewrite(
   return success();
 }
 
-struct AsyncCopyMbarrierArriveOpConversion
-    : public ConvertOpToLLVMPattern<ttng::AsyncCopyMbarrierArriveOp> {
-  using ConvertOpToLLVMPattern<
-      ttng::AsyncCopyMbarrierArriveOp>::ConvertOpToLLVMPattern;
-
-  LogicalResult
-  matchAndRewrite(ttng::AsyncCopyMbarrierArriveOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto loc = op.getLoc();
-    auto noinc = op.getNoIncrement();
-    auto barrierMemObj = LLVM::getSharedMemoryObjectFromStruct(
-        loc, adaptor.getBarrier(),
-        typeConverter->convertType(op.getBarrier().getType().getElementType()),
-        rewriter);
-    TritonLLVMOpBuilder b(loc, rewriter);
-    NVVM::CpAsyncMBarrierArriveSharedOp::create(rewriter, loc,
-                                                barrierMemObj.getBase(), noinc);
-    op->erase();
-    return success();
-  }
-};
-
 struct AsyncWaitOpConversion
     : public ConvertOpToLLVMPattern<triton::gpu::AsyncWaitOp> {
   using ConvertOpToLLVMPattern<
@@ -1873,8 +1851,8 @@ void mlir::triton::NVIDIA::populateLoadStoreOpToLLVMPatterns(
                                       axisInfoAnalysis, benefit);
   patterns.add<LoadOpConversion, StoreOpConversion>(
       typeConverter, targetInfo, computeCapability, axisInfoAnalysis, benefit);
-  patterns.add<AsyncCommitGroupOpConversion, AsyncWaitOpConversion,
-               AsyncCopyMbarrierArriveOpConversion>(typeConverter, benefit);
+  patterns.add<AsyncCommitGroupOpConversion, AsyncWaitOpConversion>(
+      typeConverter, benefit);
   patterns.add<AsyncTMACopyGlobalToLocalOpConversion,
                AsyncTMACopyLocalToGlobalOpConversion,
                AsyncTMAReduceOpConversion, AsyncTMAGatherOpConversion,

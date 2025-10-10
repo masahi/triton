@@ -2,6 +2,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Support/WalkResult.h"
+#include "triton/Analysis/AxisInfo.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/MMAv5PipelineUtility.h"
@@ -172,14 +173,26 @@ static std::optional<PartitionSet> getInitialPartitions(scf::ForOp loop) {
   Partition *mmaPartition = partitions.addPartition(1);
   Partition *loadPartition = partitions.addPartition(0);
 
+  ModuleOp mod = loop->getParentOfType<ModuleOp>();
+  triton::ModuleAxisInfoAnalysis axisInfo(mod);
+
   // Find loads to pipeline.
   SmallVector<Operation *> loadsAndAllocs;
   for (Operation &op : loop.getOps()) {
-    // Only TMA loads are supported at the moment.
-    if (!isa<DescriptorLoadOp, DescriptorGatherOp>(op))
+    // TODO: Not all tt.load should be lowered to cpasync
+    // Use canBeConvertedToAsyncLoad
+    if (!isa<LoadOp, DescriptorLoadOp, DescriptorGatherOp>(op))
       continue;
+    if (isa<LoadOp>(op) && !isPipeliningBeneficial(&op, axisInfo))
+      continue;
+
     setPartition(&op, loadPartition);
     loadsAndAllocs.push_back(&op);
+
+    if (isa<LoadOp>(op) && loop->hasAttr(kScheduledMaxStageAttrName)) {
+      // For now disable SWP when cpasync is used
+      loop->removeAttr(kScheduledMaxStageAttrName);
+    }
 
     // Local alloc users of the load with matching encoding will cause the
     // underlying buffer to be pass through. Keep track of them.

@@ -267,9 +267,17 @@ def TTNG_AsyncCopyMbarrierArriveOp : TTNG_Op<"async_copy_mbarrier_arrive"> {
   let summary = "arrive on mbarrier once all previously issued copies are completed";
   let arguments = (ins
     Arg<TTG_MemDescType, "", [MemWrite<SharedMemory>]>:$barrier,
-    UnitAttr:$noIncrement
+    UnitAttr:$noIncrement,
+    Optional<I1>:$pred
   );
-  let assemblyFormat = "$barrier attr-dict `:` qualified(type($barrier))";
+  let assemblyFormat = "$barrier (`,` $pred^)? attr-dict `:` qualified(type($barrier))";
+
+  let builders = [
+    OpBuilder<(ins "Value":$barrier, "bool":$noIncrement), [{
+      return build($_builder, $_state, barrier, noIncrement, /*pred=*/Value());
+    }]>
+  ];
+
 }
 
 

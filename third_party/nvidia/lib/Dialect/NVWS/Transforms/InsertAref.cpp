@@ -171,6 +171,16 @@ void createNVWSDescriptorLoadOp(OpBuilder &builder, Operation *ttDescLoadOp,
   }
 }
 
+void createAsyncCopyGlobalToLocalOp(OpBuilder &builder, LoadOp loadOp,
+                                    Value dataBuf, SetVector<int> const &producerPartitions,
+                                    Location loc) {
+  auto newLoad = builder.create<AsyncCopyGlobalToLocalOp>(
+      loc, loadOp.getPtr(), dataBuf, loadOp.getMask(), loadOp.getOther(),
+      loadOp.getCache(), loadOp.getEvict(), loadOp.getIsVolatile());
+  newLoad->setAttrs(loadOp->getAttrs());
+  setPartition(loadOp, producerPartitions);
+}
+
 StageCluster getStageClusterForProducer(Value producedValue) {
   if (auto opt = isDescLoadAndAlloc<LocalAllocOp>(producedValue)) {
     return getStageCluster(opt->second);
@@ -210,8 +220,13 @@ SmallVector<Operation *> createArefPut(OpBuilder &builder, ArefCreateOp aref,
     producerKind = AsyncOp::TMALoad;
     staleOps.push_back(alloc);
     staleOps.push_back(descOp);
-  } else if (isGlobalLoadAndAlloc<LocalAllocOp>(result)) {
-    llvm_unreachable("cpasync not supported yet");
+  } else if (auto opt = isGlobalLoadAndAlloc<LocalAllocOp>(result)) {
+    auto [alloc, loadOp] = *opt;
+    createAsyncCopyGlobalToLocalOp(builder, loadOp, dataBuf, producerPartitions,
+                                   loc);
+    producerKind = AsyncOp::CpAsync;
+    staleOps.push_back(alloc);
+    staleOps.push_back(loadOp);
   } else if (auto alloc = result.getDefiningOp<LocalAllocOp>()) {
     triton::gpu::createInto<LocalStoreOp>(builder, loc, producerPartitions,
                                           stageCluster, alloc.getSrc(),
@@ -224,7 +239,10 @@ SmallVector<Operation *> createArefPut(OpBuilder &builder, ArefCreateOp aref,
       producerKind = AsyncOp::TMALoad;
       staleOps.push_back(descOp);
     } else if (auto loadOp = result.getDefiningOp<triton::LoadOp>()) {
-      llvm_unreachable("cpasync not supported yet");
+      createAsyncCopyGlobalToLocalOp(builder, loadOp, dataBuf,
+                                     producerPartitions, loc);
+      producerKind = AsyncOp::CpAsync;
+      staleOps.push_back(loadOp);
     } else {
       triton::gpu::createInto<LocalStoreOp>(builder, loc, producerPartitions,
                                             stageCluster, result, dataBuf);
@@ -485,7 +503,13 @@ bool insertArefs(OpBuilder &builder, scf::ForOp loop, Block *block,
 
   processResultUses(producedValue.result);
 
+  // TODO: clean
   if (auto opt = isDescLoadAndAlloc<LocalAllocOp>(producedValue.result)) {
+    // Process the register use as well
+    auto alloc = opt->first;
+    processResultUses(alloc.getSrc());
+  } else if (auto opt =
+                 isGlobalLoadAndAlloc<LocalAllocOp>(producedValue.result)) {
     // Process the register use as well
     auto alloc = opt->first;
     processResultUses(alloc.getSrc());

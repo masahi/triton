@@ -205,6 +205,16 @@ BarrierCount getArrivalCount(ArefCreateOp op) {
         case AsyncOp::NONE:
           count.consumerPendingCount += 1;
           break;
+        case AsyncOp::CpAsync:
+          // We cannot use an arrivial count which depends on `num_warps`.
+          // We use the no-noinc variant of AsyncCopyMbarrierArriveOp and an
+          // additional ArriveBarrierOp op which is single threaded in Triton.
+          //   mbarrier.init %mbar, 1
+          //   cp.async
+          //   cp.async.mbarrier.arrive %mbar
+          //   mbarrier.arrive %mbar
+          count.consumerPendingCount += 1;
+          break;
         default:
           llvm_unreachable("unsupported producer kind");
         }
@@ -509,7 +519,14 @@ void insertArriveBarrier(Location loc, ArrayRef<AsyncOp> asyncOps,
     case AsyncOp::TMALoad:
       // nothing to do, the arrive is done by HW
       break;
-    case AsyncOp::CpAsync:
+    case AsyncOp::CpAsync: {
+      auto cpasyncArrive =
+          rewriter.create<nvidia_gpu::AsyncCopyMbarrierArriveOp>(
+              loc, mbar, /*noIncrement*/ false);
+      assignStageCluster(cpasyncArrive, partitionIds, stageCluster, rewriter);
+      arriveOp = rewriter.create<nvidia_gpu::ArriveBarrierOp>(loc, mbar, 1);
+      break;
+    }
     default:
       llvm_unreachable("unknown async op");
     }
@@ -694,7 +711,8 @@ ArefPutEnterOp getPutEnterOp(ArefCreateOp arefOp) {
 bool isProducerLoad(ArefCreateOp arefOp) {
   auto putOp = getPutEnterOp(arefOp);
   if (llvm::any_of(putOp->getUsers(), [](auto user) {
-        return isa<triton::nvws::DescriptorLoadOpInterface>(user);
+        return isa<AsyncCopyGlobalToLocalOp,
+                   triton::nvws::DescriptorLoadOpInterface>(user);
       })) {
     return true;
   }
