@@ -104,6 +104,7 @@ ArefCreateOp createAref(OpBuilder &builder, ProducedValueInfo &producedValue) {
           MemDescType::get(tensorType.getShape(), tensorType.getElementType(),
                            encoding, SharedMemorySpace);
     } else {
+      // TODO: How to handle this case for cpasync? Refer to the SWP code
       llvm_unreachable("Only TMA is expected for now.");
     }
     return memDescType;
@@ -115,6 +116,9 @@ ArefCreateOp createAref(OpBuilder &builder, ProducedValueInfo &producedValue) {
   } else if (auto opt = isDescLoadAndAlloc<TMEMAllocOp>(result)) {
     auto descLoadResult = opt->first.getSrc();
     memDescType = getSmemDescType(descLoadResult);
+  } else if (auto opt = isGlobalLoadAndAlloc<TMEMAllocOp>(result)) {
+    auto loadResult = opt->first.getSrc();
+    memDescType = getSmemDescType(loadResult);
   } else if (isa<RankedTensorType>(result.getType())) {
     memDescType = getSmemDescType(result);
   } else {
@@ -451,11 +455,21 @@ bool insertArefs(PartitionBuilder &builder, scf::ForOp loop,
 
   processResultUses(producedValue.result);
 
+  // TODO: clean
   if (auto opt = isDescLoadAndAlloc<LocalAllocOp>(producedValue.result)) {
     // Process the register use as well
     auto alloc = opt->first;
     processResultUses(alloc.getSrc());
   } else if (auto opt = isDescLoadAndAlloc<TMEMAllocOp>(producedValue.result)) {
+    auto alloc = opt->first;
+    processResultUses(alloc.getSrc());
+  } else if (auto opt =
+                 isGlobalLoadAndAlloc<LocalAllocOp>(producedValue.result)) {
+    // Process the register use as well
+    auto alloc = opt->first;
+    processResultUses(alloc.getSrc());
+  } else if (auto opt =
+                 isGlobalLoadAndAlloc<TMEMAllocOp>(producedValue.result)) {
     auto alloc = opt->first;
     processResultUses(alloc.getSrc());
   }
@@ -515,9 +529,11 @@ public:
           if (op->getNumResults() == 0) {
             return WalkResult::advance();
           }
-          // Only handles load ops for now.
+          // TODO: Do we allow register use of load op? (load without alloc)
           if (isDescLoadAndAlloc<LocalAllocOp>(op->getResult(0)) ||
               isDescLoadAndAlloc<TMEMAllocOp>(op->getResult(0)) ||
+              isGlobalLoadAndAlloc<LocalAllocOp>(op->getResult(0)) ||
+              isGlobalLoadAndAlloc<TMEMAllocOp>(op->getResult(0)) ||
               (allowDescLoadRegUse &&
                (isa<triton::DescriptorOpInterface>(op)))) {
             ops.push_back(op);
