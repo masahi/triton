@@ -486,7 +486,9 @@ def matmul_cpasync_kernel(  #
         stride_am, stride_ak,  #
         stride_bk, stride_bn,  #
         stride_cm, stride_cn,  #
-        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        num_stages: tl.constexpr
+):
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_M)
     pid_m = pid % num_pid_m
@@ -497,7 +499,7 @@ def matmul_cpasync_kernel(  #
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for _ in tl.range(0, tl.cdiv(K, BLOCK_K), warp_specialize=True):
+    for _ in tl.range(0, tl.cdiv(K, BLOCK_K), warp_specialize=True, num_stages=num_stages):
         a = tl.load(a_ptrs)
         b = tl.load(b_ptrs)
         accumulator = tl.dot(a, b, acc=accumulator)
@@ -543,3 +545,4 @@ def test_cpasync_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, device):
 
 
 # test_cpasync_matmul(1024, 1024, 1024, 128, 128, 64, 8, "cuda")
+# test_warp_specialize_tma_matmul(1024, 1024, 1024, 128, 128, 64, 3, 8, False)
