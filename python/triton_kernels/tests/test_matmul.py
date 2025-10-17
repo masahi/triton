@@ -73,7 +73,7 @@ def init_compute_data(m, n, k, gindx, sindx, n_expts_tot, n_expts_act, n_expt_sh
     if mode == 'batched' or (not has_y_gammas) or (has_y_gammas and (gindx is not None) and act_dtype.itemsize >= 2):
         gs0 = None
         gs1 = None
-    if "float8" in str(weight_dtype) and torch.cuda.get_device_capability()[0] < 10:
+    if "float8" in str(weight_dtype) and torch.cuda.get_device_capability()[0] != 10:
         w = w.transpose(-1, -2).contiguous().transpose(-1, -2)
     return x, w, bias, gs0, gs1
 
@@ -321,7 +321,7 @@ def test_op(m, n, k, split_k, do_gather, do_scatter, fused_scatter, has_y_gammas
     torch.manual_seed(0)
 
     block_k = None
-    if is_persistent and weight_dtype_str.startswith("mx") and torch.cuda.get_device_capability()[0] < 10:
+    if is_persistent and weight_dtype_str.startswith("mx") and torch.cuda.get_device_capability()[0] != 10:
         # Override block_k for testing correctness. The default is temporarily 128 for
         # performance reasons which doesn't work with persistent matmul.
         # TODO: revisit when Triton is better for H100 + MXFP4
