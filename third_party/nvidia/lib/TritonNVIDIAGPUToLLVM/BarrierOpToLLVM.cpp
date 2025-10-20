@@ -281,9 +281,9 @@ struct AsyncCopyMbarrierArriveOpConversion
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
-    auto noinc = op.getNoIncrement();
-    std::string ptx = noinc ? "cp.async.mbarrier.arrive.noinc.shared.b64 [$0];"
-                            : "cp.async.mbarrier.arrive.shared.b64 [$0];";
+    std::string noinc = op.getNoIncrement() ? ".noinc" : "";
+    std::string instr = "cp.async.mbarrier.arrive" + noinc + ".shared.b64";
+    std::string ptx = op.getPred() ? "@$0 " + instr + " [$1];" : instr + " [$0];";
 
     emitBarrier(ptx, adaptor.getBarrier(), adaptor.getPred(), getContext(),
                 rewriter, op.getLoc());
