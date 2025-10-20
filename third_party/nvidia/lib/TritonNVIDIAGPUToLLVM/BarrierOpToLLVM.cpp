@@ -230,9 +230,11 @@ void emitBarrier(std::string instr, Value barrierAlloc, Value pred,
                  MLIRContext *ctx, ConversionPatternRewriter &rewriter,
                  Location loc) {
   ::mlir::triton::PTXBuilder ptxBuilder;
-  SmallVector<PTXBuilder::Operand *, 2> operands = {
-      ptxBuilder.newOperand(pred, "b"),
-      ptxBuilder.newOperand(barrierAlloc, "r")};
+  SmallVector<PTXBuilder::Operand *, 2> operands;
+  if (pred) {
+    operands.push_back(ptxBuilder.newOperand(pred, "b"));
+  }
+  operands.push_back(ptxBuilder.newOperand(barrierAlloc, "r"));
 
   auto &arriveOp = *ptxBuilder.create<>(instr);
   arriveOp(operands, /*onlyAttachMLIRArgs=*/true);
@@ -280,14 +282,13 @@ struct AsyncCopyMbarrierArriveOpConversion
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
     auto noinc = op.getNoIncrement();
-    auto barrierMemObj = LLVM::getSharedMemoryObjectFromStruct(
-        loc, adaptor.getBarrier(),
-        typeConverter->convertType(op.getBarrier().getType().getElementType()),
-        rewriter);
-    TritonLLVMOpBuilder b(loc, rewriter);
-    rewriter.create<NVVM::CpAsyncMBarrierArriveSharedOp>(
-        loc, barrierMemObj.getBase(), noinc);
-    op->erase();
+    std::string ptx = noinc ? "cp.async.mbarrier.arrive.noinc.shared.b64 [$0];"
+                            : "cp.async.mbarrier.arrive.shared.b64 [$0];";
+
+    emitBarrier(ptx, adaptor.getBarrier(), adaptor.getPred(), getContext(),
+                rewriter, op.getLoc());
+
+    rewriter.eraseOp(op);
     return success();
   }
 };
