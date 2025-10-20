@@ -261,6 +261,30 @@ struct ArriveBarrierOpConversion
     return success();
   }
 };
+
+struct AsyncCopyMbarrierArriveOpConversion
+    : public ConvertOpToLLVMPattern<
+          triton::nvidia_gpu::AsyncCopyMbarrierArriveOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(triton::nvidia_gpu::AsyncCopyMbarrierArriveOp op,
+                  OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto noinc = op.getNoIncrement();
+    auto barrierMemObj = LLVM::getSharedMemoryObjectFromStruct(
+        loc, adaptor.getBarrier(),
+        typeConverter->convertType(op.getBarrier().getType().getElementType()),
+        rewriter);
+    TritonLLVMOpBuilder b(loc, rewriter);
+    rewriter.create<NVVM::CpAsyncMBarrierArriveSharedOp>(
+        loc, barrierMemObj.getBase(), noinc);
+    op->erase();
+    return success();
+  }
+};
+
 } // namespace
 
 void mlir::triton::NVIDIA::populateBarrierOpToLLVMPatterns(
@@ -271,5 +295,6 @@ void mlir::triton::NVIDIA::populateBarrierOpToLLVMPatterns(
                                                                   benefit);
   patterns.add<WaitBarrierOpConversion>(typeConverter, benefit, targetInfo);
   patterns.add<BarrierExpectConversion>(typeConverter, benefit);
-  patterns.add<ArriveBarrierOpConversion>(typeConverter, benefit);
+  patterns.add<ArriveBarrierOpConversion, AsyncCopyMbarrierArriveOpConversion>(
+      typeConverter, benefit);
 }
