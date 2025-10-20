@@ -266,6 +266,12 @@ void createTMALoad(triton::nvws::DescriptorLoadOp op, PatternRewriter &rewriter,
   auto indices = translateTMAIndices(
       rewriter, op.getLoc(),
       op.getDesc().getType().getBlockType().getEncoding(), op.getIndices());
+  for (auto [newIdx, oldIdx] : llvm::zip(indices, op.getIndices())) {
+    if (newIdx != oldIdx) {
+      assignStageCluster(newIdx.getDefiningOp(), getPartitionIds(op),
+                         getStageCluster(op), rewriter);
+    }
+  }
   auto newLoadOp =
       rewriter.create<triton::nvidia_gpu::AsyncTMACopyGlobalToLocalOp>(
           op.getLoc(), op.getDesc(), indices, barrierAlloc, op.getResult(),

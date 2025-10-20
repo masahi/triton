@@ -187,6 +187,9 @@ void cloneForOp(scf::ForOp forOp, SmallVector<WarpGroupBuilder> &builders,
     auto newForOp =
         b.create<scf::ForOp>(forOp.getLoc(), lb, ub, step, initArgs);
     newForOp->setAttrs(forOp->getAttrs());
+    if (forOp->hasAttr(kPartitionOutputsAttrName)) {
+      newForOp->removeAttr(kPartitionOutputsAttrName);
+    }
     newForOps.push_back(newForOp);
 
     b.mapping.map(forOp.getInductionVar(), newForOp.getInductionVar());
@@ -230,6 +233,9 @@ void cloneIfOp(scf::IfOp ifOp, SmallVector<WarpGroupBuilder> &builders,
     auto newIfOp = b.create<scf::IfOp>(ifOp.getLoc(), newIfResultTypes, cond,
                                        ifOp.elseBlock() ? true : false);
     newIfOp->setAttrs(ifOp->getAttrs());
+    if (ifOp->hasAttr(kPartitionOutputsAttrName)) {
+      newIfOp->removeAttr(kPartitionOutputsAttrName);
+    }
     newIfOps.push_back(newIfOp);
 
     for (auto [newIdx, oldIdx] : llvm::enumerate(newIfResultIndices)) {
@@ -272,6 +278,9 @@ void cloneReduceOp(triton::ReduceOp reduceOp,
     auto newReduceOp =
         b.create<triton::ReduceOp>(reduceOp.getLoc(), srcs, axis);
     newReduceOp->setAttrs(reduceOp->getAttrs());
+    if (reduceOp->hasAttr(kPartitionOutputsAttrName)) {
+      newReduceOp->removeAttr(kPartitionOutputsAttrName);
+    }
     newReduceOps.push_back(newReduceOp);
 
     mapRange(reduceOp.getResults(), newReduceOp.getResults(), b.mapping);
@@ -296,6 +305,13 @@ void cloneReduceOp(triton::ReduceOp reduceOp,
 void cloneOp(Operation *op, SmallVector<WarpGroupBuilder> &builders,
              ArrayRef<size_t> partitionIndices) {
   if (op->getNumRegions() != 0) {
+    // {
+    //   mlir::OpPrintingFlags flags;
+    //   flags.printGenericOpForm();
+    //   llvm::errs() << "op: ";
+    //   op->print(llvm::errs(), flags);
+    //   llvm::errs() << "\n";
+    // }
     llvm::report_fatal_error(
         "Ops are expected to be regionless at this point.");
   }
@@ -418,6 +434,8 @@ LogicalResult triton::gpu::partitionLoop(scf::ForOp loop) {
   ImplicitLocOpBuilder topBuilder(loop.getLoc(), loop);
   SmallVector<Value> tensorResultAllocs(loop.getNumRegionIterArgs());
   for (auto [i, res] : llvm::enumerate(loop.getResults())) {
+    if (res.use_empty())
+      continue;
     if (loopVarCategories[i] ==
         LoopVarCategory::TensorResultFromOtherPartition) {
       auto ty = cast<RankedTensorType>(res.getType());
@@ -450,7 +468,8 @@ LogicalResult triton::gpu::partitionLoop(scf::ForOp loop) {
     auto wsTag = op->getAttrOfType<IntegerAttr>(kWarpSpecializeTagAttrName);
     if (!wsTag || wsTag.getInt() != partitions.getTag())
       continue;
-    if (auto partitionIds = triton::gpu::getPartitionIds(op)) {
+    if (auto partitionIds = triton::gpu::getPartitionIds(op);
+        partitionIds && !isa<scf::ForOp>(op)) {
       cloneOp(op, builders,
               SmallVector<size_t>{partitionIds->begin(), partitionIds->end()});
       opsToErase.push_back(op);
@@ -480,6 +499,8 @@ LogicalResult triton::gpu::partitionLoop(scf::ForOp loop) {
       auto [_, reverseIndices] =
           getLoopVarIndicesToKeep(loop, &partition, partitions);
       for (size_t i = 0; i < loop.getNumRegionIterArgs(); ++i) {
+        if (loop.getResult(i).use_empty())
+          continue;
         if (loopVarCategories[i] ==
                 LoopVarCategory::TensorResultFromOtherPartition &&
             isTensorResultComputedBy(loop, i, &partition, partitions)) {
@@ -613,14 +634,14 @@ void PartitionLoops::runOnOperation() {
   });
 
   for (scf::ForOp loop : loops) {
-    loop.walk([&](triton::ReduceOp reduceOp) {
-      if (failed(inferReduceOpPartitions(reduceOp)))
-        signalPassFailure();
-    });
-    loop.walk([&](scf::IfOp ifOp) {
-      if (failed(inferIfOpPartitions(ifOp)))
-        signalPassFailure();
-    });
+    // loop.walk([&](triton::ReduceOp reduceOp) {
+    //   if (failed(inferReduceOpPartitions(reduceOp)))
+    //     signalPassFailure();
+    // });
+    // loop.walk([&](scf::IfOp ifOp) {
+    //   if (failed(inferIfOpPartitions(ifOp)))
+    //     signalPassFailure();
+    // });
     if (failed(partitionLoop(loop)))
       return signalPassFailure();
   }
