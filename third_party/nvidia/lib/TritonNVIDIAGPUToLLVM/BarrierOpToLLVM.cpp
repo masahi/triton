@@ -226,6 +226,20 @@ struct WaitBarrierOpConversion
   }
 };
 
+void emitBarrier(std::string instr, Value barrierAlloc, Value pred,
+                 MLIRContext *ctx, ConversionPatternRewriter &rewriter,
+                 Location loc) {
+  ::mlir::triton::PTXBuilder ptxBuilder;
+  SmallVector<PTXBuilder::Operand *, 2> operands = {
+      ptxBuilder.newOperand(pred, "b"),
+      ptxBuilder.newOperand(barrierAlloc, "r")};
+
+  auto &arriveOp = *ptxBuilder.create<>(instr);
+  arriveOp(operands, /*onlyAttachMLIRArgs=*/true);
+  auto voidTy = void_ty(ctx);
+  ptxBuilder.launch(rewriter, loc, voidTy);
+}
+
 struct ArriveBarrierOpConversion
     : public ConvertOpToLLVMPattern<triton::nvidia_gpu::ArriveBarrierOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -247,15 +261,8 @@ struct ArriveBarrierOpConversion
     if (op.getPred())
       pred = b.and_(pred, adaptor.getPred());
 
-    PTXBuilder ptxBuilder;
-    SmallVector<PTXBuilder::Operand *, 2> operands = {
-        ptxBuilder.newOperand(pred, "b"),
-        ptxBuilder.newOperand(adaptor.getAlloc(), "r")};
-
-    auto arriveOp = *ptxBuilder.create<>(ptxAsm.str());
-    arriveOp(operands, /*onlyAttachMLIRArgs=*/true);
-    auto voidTy = void_ty(getContext());
-    ptxBuilder.launch(rewriter, op.getLoc(), voidTy);
+    emitBarrier(ptxAsm.str(), adaptor.getAlloc(), pred, getContext(), rewriter,
+                op.getLoc());
 
     rewriter.eraseOp(op);
     return success();
