@@ -281,6 +281,8 @@ struct AsyncCopyMbarrierArriveOpConversion
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
+    // rewriter.create<NVVM::CpAsyncCommitGroupOp>(loc);
+    // rewriter.create<NVVM::CpAsyncWaitGroupOp>(loc, 0);
     std::string noinc = op.getNoIncrement() ? ".noinc" : "";
     std::string instr = "cp.async.mbarrier.arrive" + noinc + ".shared.b64";
     std::string ptx = op.getPred() ? "@$0 " + instr + " [$1];" : instr + " [$0];";

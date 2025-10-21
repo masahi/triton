@@ -524,26 +524,37 @@ def matmul_cpasync_kernel(  #
 @pytest.mark.parametrize("BLOCK_K", [64])
 @pytest.mark.parametrize("NUM_WARPS", [4, 8])
 def test_cpasync_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, device):
-    NUM_STAGES = 3
+    NUM_STAGES = 2
     torch.manual_seed(42)
     dtype = torch.float16
     dtype_dst = torch.float16
+    a = torch.ones((M, K), dtype=dtype, device=device)
+    b = torch.ones((K, N), dtype=dtype, device=device)
+    a[:, :K//2] = -1
+    b[:K//2, :] = 1
     a = torch.randn((M, K), dtype=dtype, device=device)
     b = torch.randn((K, N), dtype=dtype, device=device)
+    # a[:, :K//2] = 0
+    # b[:K//2, :] = 0
+
     bias = torch.randn((1, N), dtype=dtype_dst, device=device)
     output = torch.empty((M, N), dtype=dtype_dst, device=device)
     grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
 
     k = matmul_cpasync_kernel[grid](a, b, bias, output, M, N, K, a.stride(0), a.stride(1), b.stride(0), b.stride(1), output.stride(0),
                                     output.stride(1), BLOCK_M, BLOCK_N, BLOCK_K, num_stages=NUM_STAGES, num_warps=NUM_WARPS)
-#    print(k.asm["ptx"])
+    # print(k.asm["ptx"])
 
     ref_out = torch.empty((M, N), dtype=dtype_dst, device=device)
     cublas.matmul(a, b.T.contiguous(), ref_out)
+    print(ref_out.to(torch.float16))
+    print(output.to(torch.float16))
+    print(torch.unique(output.to(torch.float16)))
+    # print(ref_out.to(torch.float16).sum(), output.to(torch.float16).sum())
     torch.testing.assert_close(ref_out.to(torch.float16), output.to(torch.float16), atol=0.03, rtol=0.03)
-    print("ok")
+    # print("ok")
 
 
-test_cpasync_matmul(1024, 1024, 1024, 128, 128, 64, 8, "cuda")
+test_cpasync_matmul(1024, 1024, 256, 128, 128, 128, 4, "cuda")
 # test_warp_specialize_tma_matmul(1024, 1024, 1024, 128, 128, 64, 3, 8, False)
 # test_warp_specialize_attention_forward(1024, 1024, 128, 128, 3, False, 4, True)
