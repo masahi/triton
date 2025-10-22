@@ -51,18 +51,15 @@ enum class LoopVarCategory {
   TensorResultFromOtherPartition,
 };
 
-SetVector<int> getIfOpResultPartitionIds(scf::IfOp ifOp, int pos) {
-  auto arrayAttr = ifOp->getAttrOfType<ArrayAttr>(kPartitionOutputsAttrName);
-  assert(arrayAttr.size() == ifOp.getResultTypes().size());
-  auto partitionIdsRef = cast<DenseI32ArrayAttr>(arrayAttr[pos]).asArrayRef();
-  return {partitionIdsRef.begin(), partitionIdsRef.end()};
+SetVector<int> getResultPartitionIds(Operation *op, int index) {
+  return getPartitionOutputs(op)[index];
 }
 
 SetVector<int> getIfOpResultPartitionIds(scf::IfOp ifOp, Value value) {
   for (auto result : ifOp.getResults()) {
     if (result == value) {
       auto pos = result.getResultNumber();
-      return getIfOpResultPartitionIds(ifOp, pos);
+      return getResultPartitionIds(ifOp, pos);
     }
   }
   llvm_unreachable("value is not a result of if-stmt");
@@ -101,7 +98,7 @@ SmallVector<LoopVarCategory> classifyLoopVars(scf::ForOp loop,
     auto partitionIds = getPartitionIds(op, partitions.getNumPartitions());
     if (auto ifOp = dyn_cast<scf::IfOp>(op->getParentOp());
         ifOp && isa<scf::YieldOp>(op)) {
-      auto ids = getIfOpResultPartitionIds(ifOp, opnd.getOperandNumber());
+      auto ids = getResultPartitionIds(ifOp, opnd.getOperandNumber());
       partitionIds = SmallVector<size_t>(ids.begin(), ids.end());
     }
     return llvm::is_contained(partitionIds, partition->getIndex());
@@ -224,7 +221,7 @@ void cloneIfOp(scf::IfOp ifOp, SmallVector<WarpGroupBuilder> &builders,
     SmallVector<Type> newIfResultTypes;
     SmallVector<int> newIfResultIndices;
     for (auto pos = 0; pos < ifOp.getResultTypes().size(); ++pos) {
-      auto partitionIds = getIfOpResultPartitionIds(ifOp, pos);
+      auto partitionIds = getResultPartitionIds(ifOp, pos);
       if (llvm::is_contained(partitionIds, b.partitionId)) {
         newIfResultTypes.push_back(ifOp.getResult(pos).getType());
         newIfResultIndices.push_back(pos);
@@ -352,7 +349,7 @@ void cloneOpsInBlock(Block *block, SmallVector<WarpGroupBuilder> &builders,
         } else {
           auto ifOp = cast<scf::IfOp>(yieldOp->getParentOp());
           for (size_t i = 0; i < yieldOp.getOperands().size(); ++i) {
-            auto ids = getIfOpResultPartitionIds(ifOp, i);
+            auto ids = getResultPartitionIds(ifOp, i);
             if (llvm::is_contained(ids, builder.partitionId)) {
               newOperandIndices.push_back(i);
             }
