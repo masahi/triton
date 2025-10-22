@@ -788,11 +788,15 @@ void combineArefs(scf::ForOp loop) {
 
   // Arefs whose get-enter ops share the same dominant consumer can be combined
   DominanceInfo domInfo(loop);
-  llvm::DenseMap<Operation *, SmallVector<ArefGetEnterOp>> liveBeforeGroups;
+  llvm::DenseMap<std::pair<Operation *, int>, SmallVector<ArefGetEnterOp>>
+      liveBeforeGroups;
   for (auto getEnterOp : getEnterOps) {
     if (auto liveBeforeOp =
             getDominantConsumer(getEnterOp, *loop.getBody(), domInfo)) {
-      liveBeforeGroups[liveBeforeOp].push_back(getEnterOp);
+      auto partitionIds = getPartitionIds(getEnterOp);
+      assert(partitionIds && partitionIds->size() == 1);
+      liveBeforeGroups[{liveBeforeOp, partitionIds->front()}].push_back(
+          getEnterOp);
     }
   }
 
