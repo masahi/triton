@@ -46,7 +46,7 @@ bool samePartition(Operation *op1, Operation *op2) {
   return *part1 == *part2;
 }
 
-SmallVector<ProducedValueInfo> getProducedValues(Operation *op,
+SmallVector<ProducedValueInfo> getProducedValues(Operation *op, Block *loopBody,
                                                  PartitionSet &partitions) {
   SmallVector<ProducedValueInfo> producedValues;
   auto partitionIds = getPartitionIds(op);
@@ -64,7 +64,7 @@ SmallVector<ProducedValueInfo> getProducedValues(Operation *op,
 template <typename AllocOp, typename LoadOp>
 std::optional<std::pair<AllocOp, LoadOp>> isLoadAndAlloc(Value result) {
   auto alloc = result.getDefiningOp<AllocOp>();
-  if (!alloc || !alloc.getSrc())
+  if (!alloc)
     return std::nullopt;
   if (auto load = alloc.getSrc().template getDefiningOp<LoadOp>();
       load && *getPartitionIds(alloc) == *getPartitionIds(load)) {
@@ -265,8 +265,6 @@ SetVector<Operation *> getTransitiveConsumers(Operation *op,
     } else {
       if (partitions.getPartition(user) == consumerPartition) {
         opConsumers.insert(user);
-        // TODO
-        opConsumers.insert(op->getBlock()->findAncestorOpInBlock(*user));
       }
     }
   }
@@ -289,9 +287,6 @@ SmallVector<Attribute> getConsumerAsyncOpKinds(ArrayRef<Operation *> consumers,
                                                MLIRContext *ctx) {
   SetVector<AsyncOp> kindSet;
   for (auto consumer : consumers) {
-    if (isa<scf::ForOp>(consumer)) {
-      continue;
-    }
     if (isa<WarpGroupDotOp>(consumer)) {
       kindSet.insert(AsyncOp::WGMMA);
     } else if (isa<MMAv5OpInterface>(consumer)) {
@@ -314,7 +309,7 @@ getEnterAndExitStageClustersOfUses(const SetVector<Value> &producedResults,
                                    std::function<bool(Operation *)> filterUse,
                                    scf::ForOp forOp) {
   CoarseSchedule coarseSchedule;
-  if (!forOp || failed(coarseSchedule.deSerialize(forOp))) {
+  if (failed(coarseSchedule.deSerialize(forOp))) {
     return std::make_pair(std::nullopt, std::nullopt);
   }
 
@@ -345,13 +340,6 @@ void createArefGet(PartitionBuilder &builder, scf::ForOp loop,
   assert(results.size() == 1 || results.size() == 2);
   auto loc = results[0].getLoc();
 
-  scf::ForOp scheduledLoop;
-  loop->walk([&](scf::ForOp op) {
-    if (op->hasAttr(mlir::triton::kScheduledMaxStageAttrName)) {
-      scheduledLoop = op;
-    }
-  });
-
   auto filterUse = [&](Operation *use) {
     if (partitions.isInRootPartition(use)) {
       return false;
@@ -359,7 +347,7 @@ void createArefGet(PartitionBuilder &builder, scf::ForOp loop,
     return partitions.getPartition(use) == consumerPartition;
   };
   auto [stageClusterEnter, stageClusterExit] =
-      getEnterAndExitStageClustersOfUses(results, filterUse, scheduledLoop);
+      getEnterAndExitStageClustersOfUses(results, filterUse, loop);
 
   auto arefBufType = cast<MemDescType>(aref.getOperand(0).getType());
   Type bufferType = getBufferViewType(arefBufType, /*mutable*/ false);
@@ -431,8 +419,6 @@ bool insertArefs(PartitionBuilder &builder, scf::ForOp loop,
   DenseMap<Partition *, SetVector<Value>> resultsPerPartition;
   auto processResultUses = [&](Value result) {
     for (auto user : result.getUsers()) {
-      if (isa<scf::YieldOp>(user))
-        continue;
       Partition *userPartition = partitions.getPartition(user);
       if (producedValue.partition != userPartition) {
         resultsPerPartition[userPartition].insert(result);
@@ -458,11 +444,7 @@ bool insertArefs(PartitionBuilder &builder, scf::ForOp loop,
   ArefCreateOp aref;
   {
     OpBuilder::InsertionGuard g(builder);
-    scf::ForOp topLevelFor = loop;
-    while (auto outer = topLevelFor->getParentOfType<scf::ForOp>()) {
-      topLevelFor = outer;
-    }
-    builder.setInsertionPoint(topLevelFor);
+    builder.setInsertionPoint(loop);
     aref = createAref(builder, producedValue);
   }
 
@@ -523,7 +505,8 @@ public:
         });
 
         for (auto op : ops) {
-          auto producedValues = getProducedValues(op, *partitions);
+          auto producedValues =
+              getProducedValues(op, loop.getBody(), *partitions);
           for (auto producedValue : producedValues) {
             PartitionBuilder builder(op->getLoc(), op);
             builder.setInsertionPoint(op);

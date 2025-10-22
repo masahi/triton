@@ -154,19 +154,14 @@ FailureOr<PartitionSet> PartitionSet::fromLoop(scf::ForOp loop) {
         std::make_unique<Partition>(idx, stage.getInt()));
   }
 
-  SmallVector<Operation *> annotatedOps;
-  loop->walk([&](Operation *op) {
-    if (hasPartition(op)) {
-      annotatedOps.push_back(op);
-    }
-  });
-
-  for (auto op : annotatedOps) {
-    auto attrs = getPartitionIds(op);
-    for (auto idx : *attrs) {
-      if (idx < 0 || idx >= result.partitions.size())
-        return mlir::emitError(op->getLoc(), "invalid partition index ") << idx;
-      result.partitions[idx]->addOp(op);
+  for (Operation &op : loop.getBody()->without_terminator()) {
+    if (auto attrs = getPartitionIds(&op)) {
+      for (auto idx : *attrs) {
+        if (idx < 0 || idx >= result.partitions.size())
+          return mlir::emitError(op.getLoc(), "invalid partition index ")
+                 << idx;
+        result.partitions[idx]->addOp(&op);
+      }
     }
   }
 
