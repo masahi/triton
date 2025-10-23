@@ -179,6 +179,11 @@ static std::optional<PartitionSet> getInitialPartitions(scf::ForOp loop) {
     setPartition(&op, loadPartition);
     loadsAndAllocs.push_back(&op);
 
+    if (isa<LoadOp>(op) && loop->hasAttr(kScheduledMaxStageAttrName)) {
+      // For now disable SWP when cpasync is used
+      loop->removeAttr(kScheduledMaxStageAttrName);
+    }
+
     // Local alloc users of the load with matching encoding will cause the
     // underlying buffer to be pass through. Keep track of them.
     SharedEncodingTrait sharedEnc = getSharedEncoding(&op);
