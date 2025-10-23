@@ -520,6 +520,7 @@ def matmul_cpasync_kernel(  #
 @pytest.mark.parametrize("BLOCK_N", [128, 256])
 @pytest.mark.parametrize("BLOCK_K", [64])
 @pytest.mark.parametrize("NUM_WARPS", [4, 8])
+@pytest.mark.skipif(not is_blackwell(), reason="Requires Blackwell")
 def test_cpasync_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, device):
     NUM_STAGES = 2
     torch.manual_seed(42)
@@ -560,6 +561,7 @@ def matmul_cpasync_persistent_kernel(  #
         stride_cm, stride_cn,  #
         BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
         NUM_SMS: tl.constexpr,
+        FLATTEN: tl.constexpr,
         num_stages: tl.constexpr
 ):
     start_pid = tl.program_id(axis=0)
@@ -589,10 +591,9 @@ def matmul_cpasync_persistent_kernel(  #
         offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
         acc = accumulator.to(tl.float16)
         output_ptrs = output_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-        # bias_ptrs = bias_ptr + offs_bn[None, :]
-        # bias = tl.load(bias_ptrs)
-        # tl.store(output_ptrs, acc + bias)
-        tl.store(output_ptrs, acc)
+        bias_ptrs = bias_ptr + offs_bn[None, :]
+        bias = tl.load(bias_ptrs)
+        tl.store(output_ptrs, acc + bias)
 
 
 @pytest.mark.parametrize("M", [256, 1024, 8192])
@@ -602,6 +603,7 @@ def matmul_cpasync_persistent_kernel(  #
 @pytest.mark.parametrize("BLOCK_N", [128, 256])
 @pytest.mark.parametrize("BLOCK_K", [64])
 @pytest.mark.parametrize("NUM_WARPS", [4, 8])
+@pytest.mark.skipif(not is_blackwell(), reason="Requires Blackwell")
 def test_cpasync_persistent_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, device):
     NUM_STAGES = 2
     torch.manual_seed(42)
@@ -623,7 +625,7 @@ def test_cpasync_persistent_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS
 
     k = matmul_cpasync_persistent_kernel[grid](a, b, bias, output, M, N, K, a.stride(0), a.stride(1), b.stride(0), b.stride(1), output.stride(0),
                                                output.stride(1), BLOCK_M, BLOCK_N, BLOCK_K,
-                                               NUM_SMS=NUM_SMS, num_stages=NUM_STAGES, num_warps=NUM_WARPS)
+                                               NUM_SMS=NUM_SMS, FLATTEN=True, num_stages=NUM_STAGES, num_warps=NUM_WARPS)
     print(k.asm["ttgir"])
 
     ref_out = torch.empty((M, N), dtype=dtype_dst, device=device)
@@ -632,9 +634,72 @@ def test_cpasync_persistent_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS
     # print(output.to(torch.float16))
     # print(torch.unique(output.to(torch.float16)))
     # print(ref_out.to(torch.float16).sum(), output.to(torch.float16).sum())
+    torch.testing.assert_close(ref_out.to(torch.float16) + bias, output.to(torch.float16), atol=0.03, rtol=0.03)
+
+
+
+@triton.jit
+def matmul_kernel_mixed_tma_cpasync(  #
+        a_desc, b_ptr, output_ptr,  #
+        M, N, K,  #
+        stride_bk, stride_bn,  #
+        stride_cm, stride_cn,  #
+        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_M)
+    pid_m = pid % num_pid_m
+    pid_n = pid // num_pid_m
+    offs_m_tma = pid_m * BLOCK_M
+    offs_bn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) % N
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_k_tma = 0
+    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for _ in tl.range(0, tl.cdiv(K, BLOCK_K), warp_specialize=True):
+        a = a_desc.load([offs_m_tma, offs_k_tma])
+        b = tl.load(b_ptrs)
+        accumulator = tl.dot(a, b, acc=accumulator)
+        b_ptrs += BLOCK_K * stride_bk
+        offs_k_tma += BLOCK_K
+
+    offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    output_ptrs = output_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    tl.store(output_ptrs, accumulator.to(tl.float16))
+
+
+@pytest.mark.parametrize("M", [256, 1024, 8192])
+@pytest.mark.parametrize("N", [256, 1024, 4096])
+@pytest.mark.parametrize("K", [128, 1024, 2048])
+@pytest.mark.parametrize("BLOCK_M", [128])
+@pytest.mark.parametrize("BLOCK_N", [128, 256])
+@pytest.mark.parametrize("BLOCK_K", [64])
+@pytest.mark.parametrize("NUM_WARPS", [4, 8])
+@pytest.mark.skipif(not is_blackwell(), reason="Requires Blackwell")
+def test_mixed_tma_cpasync(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, device):
+    NUM_STAGES = 3
+    torch.manual_seed(42)
+    dtype = torch.float16
+    a = torch.randn((M, K), dtype=dtype, device=device)
+    b = torch.randn((K, N), dtype=dtype, device=device)
+    dtype_dst = torch.float16
+    output = torch.empty((M, N), dtype=dtype_dst, device=device)
+    grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
+
+    a_desc = TensorDescriptor.from_tensor(a, [BLOCK_M, BLOCK_K])
+
+    k = matmul_kernel_mixed_tma_cpasync[grid](a_desc, b, output, M, N, K, b.stride(0), b.stride(1), output.stride(0),
+                                              output.stride(1), BLOCK_M, BLOCK_N, BLOCK_K, num_stages=NUM_STAGES, num_warps=NUM_WARPS)
+
+
+    print(k.asm["ttgir"])
+
+    ref_out = torch.empty((M, N), dtype=dtype_dst, device=device)
+    cublas.matmul(a, b.T.contiguous(), ref_out)
     torch.testing.assert_close(ref_out.to(torch.float16), output.to(torch.float16), atol=0.03, rtol=0.03)
+    print("ok")
 
 
-test_cpasync_persistent_matmul(1024, 1024, 1024, 128, 128, 128, 8, "cuda")
+test_mixed_tma_cpasync(1024, 1024, 1024, 128, 128, 128, 8, "cuda")
 # test_warp_specialize_tma_matmul(1024, 1024, 1024, 128, 128, 64, 3, 8, False)
 # test_warp_specialize_attention_forward(1024, 1024, 128, 128, 3, False, 4, True)
