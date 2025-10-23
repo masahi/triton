@@ -409,8 +409,8 @@ template <class T> struct AssignStagePhase {
             enterOp && (!hasPartition(enterOp) ||
                         getPartitionIds(enterOp)->front() == partitionId)) {
           DenseSet<Operation *> visited;
-          llvm::errs() << "propagating stage:\n"
-                       << arefOp->getParentOfType<triton::FuncOp>() << "\n";
+          // llvm::errs() << "propagating stage:\n"
+          //              << arefOp->getParentOfType<triton::FuncOp>() << "\n";
           arefIndex.propagateStage(enterOp.getToken(), enterOp.getStage(),
                                    visited);
         }

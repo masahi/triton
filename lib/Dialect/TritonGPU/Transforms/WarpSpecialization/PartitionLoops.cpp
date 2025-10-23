@@ -99,7 +99,8 @@ SmallVector<LoopVarCategory> classifyLoopVars(scf::ForOp loop,
     auto partitionIds = getResultPartitionIds(loop, i);
     if (llvm::is_contained(partitionIds, partition->getIndex())) {
       categories[i] = LoopVarCategory::Used;
-    } else if (isTensorResultFromOtherPartition(i)) {
+    } else if (isTensorResultFromOtherPartition(i) &&
+               !loop.getResult(i).use_empty()) {
       categories[i] = LoopVarCategory::TensorResultFromOtherPartition;
     } else {
       categories[i] = LoopVarCategory::Unused;
@@ -118,13 +119,7 @@ getLoopVarIndicesToKeep(scf::ForOp loop, const Partition *partition,
   SmallVector<std::optional<size_t>> reverseIndices(loop.getNumRegionIterArgs(),
                                                     std::nullopt);
   for (auto [i, arg] : llvm::enumerate(loop.getRegionIterArgs())) {
-    // For the default partition, keep non-tensor results used outside of the
-    // loop even if the corresponding loop variable is not used in that
-    // partition.
-    if (loopVarCategories[i] == LoopVarCategory::Used ||
-        (partition->getIndex() == 0 && !loop.getResult(i).use_empty() &&
-         loopVarCategories[i] !=
-             LoopVarCategory::TensorResultFromOtherPartition)) {
+    if (loopVarCategories[i] == LoopVarCategory::Used) {
       reverseIndices[i] = indices.size();
       indices.push_back(i);
     }
@@ -151,6 +146,7 @@ void cloneOpsInBlock(Block *block, SmallVector<WarpGroupBuilder> &builders,
 void cloneForOp(scf::ForOp forOp, SmallVector<WarpGroupBuilder> &builders,
                 const PartitionSet &partitions) {
   auto forOpPartitions = *getPartitionIds(forOp);
+
   SmallVector<scf::ForOp> newForOps;
   for (int i : forOpPartitions) {
     auto &b = builders[i];
@@ -410,8 +406,6 @@ LogicalResult triton::gpu::partitionLoop(scf::ForOp loop) {
   ImplicitLocOpBuilder topBuilder(loop.getLoc(), loop);
   SmallVector<Value> tensorResultAllocs(loop.getNumRegionIterArgs());
   for (auto [i, res] : llvm::enumerate(loop.getResults())) {
-    if (res.use_empty())
-      continue;
     if (loopVarCategories[i] ==
         LoopVarCategory::TensorResultFromOtherPartition) {
       auto ty = cast<RankedTensorType>(res.getType());
@@ -444,7 +438,8 @@ LogicalResult triton::gpu::partitionLoop(scf::ForOp loop) {
     auto wsTag = op->getAttrOfType<IntegerAttr>(kWarpSpecializeTagAttrName);
     if (!wsTag || wsTag.getInt() != partitions.getTag())
       continue;
-    if (auto partitionIds = triton::gpu::getPartitionIds(op)) {
+    if (auto partitionIds = triton::gpu::getPartitionIds(op);
+        partitionIds && !isa<scf::ForOp>(op)) {
       cloneOp(op, builders, *partitionIds);
       opsToErase.push_back(op);
     } else {
@@ -456,6 +451,10 @@ LogicalResult triton::gpu::partitionLoop(scf::ForOp loop) {
 
   for (auto [b, region, partition] : llvm::zip(
            builders, wgOp.getPartitionRegions(), partitions.getPartitions())) {
+    if (!llvm::is_contained(*getPartitionIds(loop), b.partitionId)) {
+      b.create<nvws::WarpGroupYieldOp>(wgOp.getLoc(), SmallVector<Value>{});
+      continue;
+    }
     auto newForOp = *region.front().getOps<scf::ForOp>().begin();
     auto outputs = newForOp.getResults();
 
@@ -473,8 +472,6 @@ LogicalResult triton::gpu::partitionLoop(scf::ForOp loop) {
       auto [_, reverseIndices] =
           getLoopVarIndicesToKeep(loop, &partition, partitions);
       for (size_t i = 0; i < loop.getNumRegionIterArgs(); ++i) {
-        if (loop.getResult(i).use_empty())
-          continue;
         if (loopVarCategories[i] ==
                 LoopVarCategory::TensorResultFromOtherPartition &&
             isTensorResultComputedBy(loop, i, &partition, partitions)) {
