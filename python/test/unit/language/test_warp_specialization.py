@@ -1,6 +1,7 @@
 import torch
 import pytest
 import pathlib
+import re
 import triton
 import triton.language as tl
 
@@ -554,11 +555,11 @@ def test_cpasync_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, device):
 
 @triton.jit
 def matmul_kernel_mixed_tma_cpasync(  #
-        a_desc, b_ptr, output_ptr,  #
+        a_desc, b_ptr, a_scale_ptr, output_ptr,  #
         M, N, K,  #
         stride_bk, stride_bn,  #
         stride_cm, stride_cn,  #
-        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, WITH_SCALE: tl.constexpr):
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_M)
     pid_m = pid % num_pid_m
@@ -568,13 +569,20 @@ def matmul_kernel_mixed_tma_cpasync(  #
     offs_k = tl.arange(0, BLOCK_K)
     offs_k_tma = 0
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    a_scale_ptr = a_scale_ptr + offs_k[None, :]
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for _ in tl.range(0, tl.cdiv(K, BLOCK_K), warp_specialize=True):
         a = a_desc.load([offs_m_tma, offs_k_tma])
         b = tl.load(b_ptrs)
+
+        if WITH_SCALE:
+            scales = tl.load(a_scale_ptr)
+            a *= scales
+
         accumulator = tl.dot(a, b, acc=accumulator)
         b_ptrs += BLOCK_K * stride_bk
         offs_k_tma += BLOCK_K
+        a_scale_ptr += BLOCK_K
 
     offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -589,31 +597,41 @@ def matmul_kernel_mixed_tma_cpasync(  #
 @pytest.mark.parametrize("BLOCK_N", [128, 256])
 @pytest.mark.parametrize("BLOCK_K", [64])
 @pytest.mark.parametrize("NUM_WARPS", [4, 8])
+@pytest.mark.parametrize("WITH_SCALE", [False, True])
 @pytest.mark.skipif(not is_blackwell(), reason="Requires Blackwell")
-def test_mixed_tma_cpasync(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, device):
+def test_mixed_tma_cpasync(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, WITH_SCALE, device):
     NUM_STAGES = 3
     torch.manual_seed(42)
     dtype = torch.float16
     a = torch.randn((M, K), dtype=dtype, device=device)
     b = torch.randn((K, N), dtype=dtype, device=device)
+    if WITH_SCALE:
+        a_scales = torch.randn((1, K), dtype=dtype, device=device)
+    else:
+        a_scales = torch.ones((1, K), dtype=dtype, device=device)
     dtype_dst = torch.float16
     output = torch.empty((M, N), dtype=dtype_dst, device=device)
     grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
 
     a_desc = TensorDescriptor.from_tensor(a, [BLOCK_M, BLOCK_K])
 
-    k = matmul_kernel_mixed_tma_cpasync[grid](a_desc, b, output, M, N, K, b.stride(0), b.stride(1), output.stride(0),
-                                              output.stride(1), BLOCK_M, BLOCK_N, BLOCK_K, num_stages=NUM_STAGES, num_warps=NUM_WARPS)
+    k = matmul_kernel_mixed_tma_cpasync[grid](a_desc, b, a_scales, output, M, N, K, b.stride(0), b.stride(1), output.stride(0),
+                                              output.stride(1), BLOCK_M, BLOCK_N, BLOCK_K,
+                                              WITH_SCALE=WITH_SCALE, num_stages=NUM_STAGES, num_warps=NUM_WARPS)
 
+    ttgir = k.asm["ttgir"]
 
-    print(k.asm["ttgir"])
+    if not WITH_SCALE:
+        # Arefs for TMA and cpasync should be merged, the arrival count should be 2
+        assert re.search("ttng.init_barrier %(.*) 2", ttgir)
+    else:
+        assert re.search("ttng.init_barrier %(.*) 2", ttgir) is None
 
     ref_out = torch.empty((M, N), dtype=dtype_dst, device=device)
-    cublas.matmul(a, b.T.contiguous(), ref_out)
+    cublas.matmul(a * a_scales, b.T.contiguous(), ref_out)
     torch.testing.assert_close(ref_out.to(torch.float16), output.to(torch.float16), atol=0.03, rtol=0.03)
-    print("ok")
 
 
-test_mixed_tma_cpasync(1024, 1024, 1024, 128, 128, 128, 8, "cuda")
-# test_warp_specialize_tma_matmul(1024, 1024, 1024, 128, 128, 64, 3, 8, False)
+# test_mixed_tma_cpasync(1024, 1024, 1024, 128, 128, 128, 8, True, "cuda")
+test_warp_specialize_tma_matmul(1024, 1024, 1024, 128, 128, 64, 3, 4, False)
 # test_warp_specialize_attention_forward(1024, 1024, 128, 128, 3, False, 4, True)
