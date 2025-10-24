@@ -90,24 +90,12 @@ ArefCreateOp createAref(OpBuilder &builder, ProducedValueInfo &producedValue) {
 
   auto getSmemDescType = [](Value tensorResult) {
     auto tensorType = cast<RankedTensorType>(tensorResult.getType());
-    MemDescType memDescType;
     Attribute SharedMemorySpace =
         SharedMemorySpaceAttr::get(tensorType.getContext());
-    if (auto load =
-            tensorResult.getDefiningOp<triton::DescriptorOpInterface>()) {
-      // A use of TMA which is not immediately consumed by LocalAlloc
-      // This case applies, for example, when TMA is followed by SIMT ops
-      // or MMAv2 is used.
-      auto encoding =
-          getEncodingFromDescriptor(load, tensorType, load.getDesc());
-      memDescType =
-          MemDescType::get(tensorType.getShape(), tensorType.getElementType(),
-                           encoding, SharedMemorySpace);
-    } else {
-      // TODO: How to handle this case for cpasync? Refer to the SWP code
-      llvm_unreachable("Only TMA is expected for now.");
-    }
-    return memDescType;
+    auto encoding = getSharedEncoding(tensorResult.getDefiningOp());
+    assert(encoding);
+    return MemDescType::get(tensorType.getShape(), tensorType.getElementType(),
+                            encoding, SharedMemorySpace);
   };
 
   MemDescType memDescType;
@@ -523,7 +511,7 @@ public:
       // addition to being consumed by local_alloc op, we process
       // local_alloc(desc_load()) first, followed by remaining register uses of
       // desc_load results.
-      for (auto allowDescLoadRegUse : {false, true}) {
+      for (auto allowRegUse : {false, true}) {
         SmallVector<Operation *> ops;
         loop.walk([&](Operation *op) {
           if (op->getNumResults() == 0) {
@@ -534,8 +522,8 @@ public:
               isDescLoadAndAlloc<TMEMAllocOp>(op->getResult(0)) ||
               isGlobalLoadAndAlloc<LocalAllocOp>(op->getResult(0)) ||
               isGlobalLoadAndAlloc<TMEMAllocOp>(op->getResult(0)) ||
-              (allowDescLoadRegUse &&
-               (isa<triton::DescriptorOpInterface>(op)))) {
+              (allowRegUse &&
+               (isa<triton::DescriptorOpInterface, LoadOp>(op)))) {
             ops.push_back(op);
           } else if (isa<LocalAllocOp>(op)) {
             ops.push_back(op);
