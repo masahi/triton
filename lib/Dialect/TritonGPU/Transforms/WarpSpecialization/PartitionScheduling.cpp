@@ -1,6 +1,7 @@
 #include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
+#include "triton/Analysis/AxisInfo.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/MMAv5PipelineUtility.h"
@@ -169,6 +170,9 @@ static std::optional<PartitionSet> getInitialPartitions(scf::ForOp loop) {
   Partition *mmaPartition = partitions.addPartition(1);
   Partition *loadPartition = partitions.addPartition(0);
 
+  ModuleOp mod = loop->getParentOfType<ModuleOp>();
+  triton::ModuleAxisInfoAnalysis axisInfo(mod);
+
   // Find loads to pipeline.
   SmallVector<Operation *> loadsAndAllocs;
   for (Operation &op : loop.getOps()) {
@@ -176,6 +180,9 @@ static std::optional<PartitionSet> getInitialPartitions(scf::ForOp loop) {
     // Use canBeConvertedToAsyncLoad
     if (!isa<LoadOp, DescriptorLoadOp, DescriptorGatherOp>(op))
       continue;
+    if (isa<LoadOp>(op) && !isPipeliningBeneficial(&op, axisInfo))
+      continue;
+
     setPartition(&op, loadPartition);
     loadsAndAllocs.push_back(&op);
 
