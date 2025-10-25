@@ -953,6 +953,52 @@ TEST(SupremumTest, ErrorOnInconsistentOrder) {
 }
 #endif
 
+std::unique_ptr<uint64_t[]> getMatrix(const LinearLayout &layout) {
+  int numRows = layout.getTotalOutDimSizeLog2();
+  int numCols = layout.getTotalInDimSizeLog2();
+  llvm::outs() << numRows << ", " << numCols << "\n";
+
+  // Don't handle giant LLs.  This makes some things easier; for example, each
+  // row can be a single uint64_t.
+  assert(numCols <= 64 && "LinearLayout too large");
+  assert(numRows <= 64 && "LinearLayout too large");
+
+  // Suppose we have a layout specified by the following values.
+  //
+  //   L(0,1) = (0b01, 0b1)
+  //   L(0,2) = (0b10, 0b0)
+  //   L(1,0) = (0b10, 0b0)
+  //   L(2,0) = (0b11, 0b0)
+  //
+  // We will create one column per entry above.  The max bit width of the
+  // codomain is (2,1), so our matrix will have 2+1=3 rows.  The final matrix
+  // will be
+  //
+  //  | L(0,1)[0] L(0,2)[0] L(1,0)[0] L(2,0)[0] |   | 0b1001 |
+  //  |    ↓         ↓         ↓         ↓      |   | 0b0111 |
+  //  | L(0,1)[1] L(0,2)[1] L(1,0)[1] L(2,0)[1] | = | 0b1000 |
+  //  |    ↓         ↓         ↓         ↓      |
+  //
+  // Note `new uint64_t[n]()` is zero-initialized, but `new uint64_t[n]` is not.
+  std::unique_ptr<uint64_t[]> m(new uint64_t[numRows]());
+  int r = 0;
+  for (StringAttr outDim : layout.getOutDimNames()) {
+    int c = 0;
+    for (StringAttr inDim : layout.getInDimNames()) {
+      for (int i = 0; i < layout.getInDimSizeLog2(inDim); i++) {
+        uint64_t basis = layout.getBasis(inDim, i, outDim);
+        for (int j = 0; j < layout.getOutDimSizeLog2(outDim); j++) {
+          m[r + j] |= ((basis >> j) & 1) << c;
+        }
+        c++;
+      }
+    }
+    r += layout.getOutDimSizeLog2(outDim);
+  }
+
+  return m;
+}
+
 TEST_F(LinearLayoutTest, Divide_Basic) {
   // Test division when A = B * C.
   auto B = LinearLayout::identity1D(8, S("in"), S("out"));
@@ -970,6 +1016,12 @@ TEST_F(LinearLayoutTest, Divide_Basic) {
   isC = divideRight(C * B, B);
   EXPECT_TRUE(isC.has_value());
   EXPECT_EQ(isC.value(), C);
+
+  auto ll = LinearLayout::zeros1D(2, S("in"), S("out")) * LinearLayout::identity1D(4, S("in"), S("out"));
+  ll.getBases();
+  llvm::errs() << ll.toString() << "\n";
+
+  auto mat = getMatrix(ll);
 }
 
 TEST_F(LinearLayoutTest, Divide_NonMatchingDims) {

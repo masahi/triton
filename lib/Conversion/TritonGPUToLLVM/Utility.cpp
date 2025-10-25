@@ -545,6 +545,8 @@ SmallVector<Value> lowerLdSt(
   auto [elemsPerVec, permutation] =
       largestVectorisation(ctx, cvt, bitwidth, maybeMaxVecElems);
 
+  llvm::errs() <<"Initial cvt \n" << cvt.toString() << "\n";
+
   cvt = permutation.apply(cvt);
   if (isStore) {
     vals = permutation.apply(vals);
@@ -554,17 +556,24 @@ SmallVector<Value> lowerLdSt(
   auto quot = divideLeft(cvt, tile);
   assert(quot.has_value() && "cvt must be divisible by tile");
   LinearLayout reps = zerosLike(tile) * *quot;
+  llvm::errs() << "elemsPerVec \n"<<elemsPerVec << "\n";
+  llvm::errs() << "after perm \n"<< cvt.toString() << "\n";
+  llvm::errs() << "tile \n"<<tile.toString() << "\n";
+  llvm::errs() << "quot \n"<<quot->toString() << "\n";
+  llvm::errs() << "reps \n"<<reps.toString() << "\n";
 
   LinearLayout addrLayout =
       LinearLayout({{kLane, reps.getBases().lookup(kLane)},
                     {kWarp, reps.getBases().lookup(kWarp)}},
                    reps.getOutDims(), false);
+  llvm::errs() << "addLayout \n"<< addrLayout.toString() << "\n";
   auto [nAdditive, permStrides] =
       actionAdditiveStrides(reps, addrLayout, maskSpanAffineOffset);
   reps = permStrides.apply(reps);
   if (isStore) {
     vals = permStrides.apply(vals);
   }
+  llvm::errs() << "reps after perm \n"<< reps.toString() << "\n";
 
   // PTX expects the address increments to be done in bytes
   // If we don't perform the computations in i8, the compiler would
@@ -580,6 +589,8 @@ SmallVector<Value> lowerLdSt(
           {{kReg, b.i32_val(0)}, {kLane, laneId}, {kWarp, warpId}})[0]
           .second;
 
+  llvm::errs() << "i8AddLayout \n"<< i8AddrLayout.toString() << "\n";
+
   // It's fine that we don't compute the offset in bytes as affineOffset
   // will be folded into a constant
   auto affineOffsetI8 = b.mul(affineOffset, b.i32_val(bitwidth / 8));
@@ -588,6 +599,8 @@ SmallVector<Value> lowerLdSt(
   auto vecTy = vec_ty(llvmElemTy, elemsPerVec);
   for (int i = 0; i < cvt.getInDimSize(kReg); i += nAdditive) {
     auto regIdx = reps.apply({{kReg, i}, {kLane, 0}, {kWarp, 0}})[0].second;
+    auto regIdx2 = cvt.apply({{kReg, i}, {kLane, 0}, {kWarp, 0}})[0].second;
+    llvm::outs() << i <<"," <<regIdx << "," << regIdx2 << "\n";
     auto regIdxI8 = regIdx * (bitwidth / 8);
     Value offset = b.xor_(regBaseI8, b.i32_val(regIdxI8));
     for (int j = 0; j < nAdditive; j += elemsPerVec) {

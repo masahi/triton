@@ -1112,6 +1112,7 @@ struct AsyncCopyGlobalToLocalOpConversion
   LogicalResult
   matchAndRewrite(triton::gpu::AsyncCopyGlobalToLocalOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    llvm::errs() << "lower cpasync\n";
     auto ctx = getContext();
     auto loc = op.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -1162,8 +1163,10 @@ struct AsyncCopyGlobalToLocalOpConversion
 
     // Remove broadcasted registers
     auto srcLayout = ttg::toLinearLayout(srcTy);
+    llvm::errs() << "Initial srcLayout \n" << srcLayout.toString() << "\n";
     auto removeBroadcastSrc = actionRemoveBroadcastedRegs(srcLayout);
     srcLayout = removeBroadcastSrc.apply(srcLayout);
+    llvm::errs() << "After removeBroadcastRegs \n" << srcLayout.toString() << "\n";
     vals = removeBroadcastSrc.apply(vals);
 
     // We can load N elements at a time if:
