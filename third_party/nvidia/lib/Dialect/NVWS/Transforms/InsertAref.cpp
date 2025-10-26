@@ -505,8 +505,15 @@ public:
       if (failed(partitions))
         continue;
 
-      int arefTag = 0;
+      auto getStage = [](Operation *op) -> std::optional<int64_t> {
+        if (auto stage = op->getAttrOfType<IntegerAttr>(kLoopStageAttrName)) {
+          return stage.getValue().getSExtValue();
+        }
+        return std::nullopt;
+      };
 
+      int arefTag = 0;
+      int loadMaxStage = -1;
       // To handle cases where desc_load result in registers is used as is in
       // addition to being consumed by local_alloc op, we process
       // local_alloc(desc_load()) first, followed by remaining register uses of
@@ -517,7 +524,6 @@ public:
           if (op->getNumResults() == 0) {
             return WalkResult::advance();
           }
-          // TODO: Do we allow register use of load op? (load without alloc)
           if (isDescLoadAndAlloc<LocalAllocOp>(op->getResult(0)) ||
               isDescLoadAndAlloc<TMEMAllocOp>(op->getResult(0)) ||
               isGlobalLoadAndAlloc<LocalAllocOp>(op->getResult(0)) ||
@@ -525,6 +531,9 @@ public:
               (allowRegUse &&
                (isa<triton::DescriptorOpInterface, LoadOp>(op)))) {
             ops.push_back(op);
+            auto stage = getStage(op);
+            assert(stage);
+            loadMaxStage = std::max<int>(loadMaxStage, *stage);
           } else if (isa<LocalAllocOp>(op)) {
             ops.push_back(op);
           }
@@ -532,6 +541,18 @@ public:
         });
 
         for (auto op : ops) {
+          if (isa<triton::DescriptorOpInterface, LoadOp>(op) &&
+              *getStage(op) != loadMaxStage) {
+            // Skip creating an aref for loads at earlier pipeline stages than
+            // the maximum ones. Creating aref for loads means they are lowered
+            // to their async counterparts and multi-buffered. Loads at earlier
+            // pipeline stages are likely to be in a non-load partition, or used
+            // as an input to a dependent load in a load partition. It is
+            // possible to pipeline them, but for simplicity we do not that for
+            // now.
+            continue;
+          }
+
           auto producedValues =
               getProducedValues(op, loop.getBody(), *partitions);
           for (auto producedValue : producedValues) {
