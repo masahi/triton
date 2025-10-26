@@ -631,7 +631,85 @@ def test_mixed_tma_cpasync(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, WITH_S
     cublas.matmul(a * a_scales, b.T.contiguous(), ref_out)
     torch.testing.assert_close(ref_out.to(torch.float16), output.to(torch.float16), atol=0.03, rtol=0.03)
 
+    print(ttgir)
+
+
+@triton.jit
+def indirect_matmul_kernel(
+    Out,
+    stride_out1,
+    A,
+    stride_a1,
+    B,
+    stride_b1,
+    Indices,
+    K,
+
+    # output tile size:
+    BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    index_ptrs = Indices + tl.arange(0, BLOCK_K)
+
+    m_offs = tl.arange(0, BLOCK_M)
+    n_offs = tl.arange(0, BLOCK_N)[None, :]
+
+    A_ptrs = A + n_offs
+    B_ptrs = B + m_offs
+
+    acc = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
+    for k in tl.range(0, K, BLOCK_K, warp_specialize=False):
+        idx = tl.load(index_ptrs)
+
+        a = tl.load(A_ptrs + idx[:, None] * stride_a1)
+        b = tl.load(B_ptrs + idx[:, None] * stride_b1)
+
+        acc = tl.dot(b.T, a, acc=acc)
+        index_ptrs += BLOCK_K
+
+    Out_ptrs = Out + m_offs[:, None] + n_offs * stride_out1
+    tl.store(Out_ptrs, acc)
+
+
+@pytest.mark.parametrize("BLOCK_M, BLOCK_N, BLOCK_K", [(128, 128, 128), (128, 128, 64), (128, 64, 128)])
+def test_cpasync_indirect_matmul(BLOCK_M, BLOCK_N, BLOCK_K, device):
+    num_stages = 3
+    M = BLOCK_M
+    N = BLOCK_N
+
+    K = BLOCK_K * 2
+    A = torch.randn((K, N), device=device, dtype=torch.float16)
+    B = torch.randn((K, M), device=device, dtype=torch.float16)
+
+    # Use arange for indices so it's numerically just a matmul
+    Indices = torch.arange(K, device=device)
+    Out = torch.empty((N, M), device=device, dtype=torch.float32)
+
+    expect = torch.matmul(A.mT.to(torch.float32), B.to(torch.float32))
+
+    out = indirect_matmul_kernel[(1, )](
+        Out,
+        Out.stride(0),
+        A,
+        A.stride(0),
+        B,
+        B.stride(0),
+        Indices,
+        K,
+        BLOCK_M,
+        BLOCK_K,
+        BLOCK_N,
+        num_warps=4,
+        num_stages=num_stages,
+    )
+
+    print(out.asm["ttgir"])
+
+    torch.testing.assert_close(expect, Out, atol=0.03, rtol=0.03)
+
 
 # test_mixed_tma_cpasync(1024, 1024, 1024, 128, 128, 128, 8, True, "cuda")
-test_warp_specialize_tma_matmul(1024, 1024, 1024, 128, 128, 64, 3, 4, False)
+test_cpasync_indirect_matmul(128, 128, 64, "cuda")
+# test_warp_specialize_tma_matmul(1024, 1024, 1024, 128, 128, 64, 3, 4, False)
 # test_warp_specialize_attention_forward(1024, 1024, 128, 128, 3, False, 4, True)
