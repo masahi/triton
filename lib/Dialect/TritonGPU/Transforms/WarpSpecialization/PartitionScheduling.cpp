@@ -180,6 +180,25 @@ static std::optional<PartitionSet> getInitialPartitions(scf::ForOp loop) {
       continue;
     if (isa<LoadOp>(op) && !isPipeliningBeneficial(&op, axisInfo))
       continue;
+    if (auto loadOp = dyn_cast<LoadOp>(op)) {
+      if (auto loadOpSrcOp = loadOp.getPtr().getDefiningOp()) {
+        // Make sure to include the pointer update op in the load partition. A
+        // tensor of pointers cannot be communicated between the default and the
+        // load partitions.
+        setPartition(loadOpSrcOp, loadPartition);
+
+        BackwardSliceOptions opt;
+        opt.omitBlockArguments = true;
+        SetVector<Operation *> backwardSlice;
+        (void)getBackwardSlice(loadOpSrcOp, &backwardSlice, opt);
+        llvm::errs() << "backward slice\n";
+        for (auto op : backwardSlice) {
+          if (op->getParentOfType<scf::ForOp>() == loop) {
+            setPartition(op, loadPartition);
+          }
+        }
+      }
+    }
 
     setPartition(&op, loadPartition);
     loadsAndAllocs.push_back(&op);
