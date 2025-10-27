@@ -1166,6 +1166,13 @@ struct AsyncCopyGlobalToLocalOpConversion
     srcLayout = removeBroadcastSrc.apply(srcLayout);
     vals = removeBroadcastSrc.apply(vals);
 
+    auto smemLayout = ttg::toLinearLayout(dstTy);
+    auto cvt = srcLayout.invertAndCompose(smemLayout);
+    if (!cvt.isTrivialOver({str_attr("block")})) {
+      return emitError(loc,
+                       "cp.async does not support non-trivial block dimension");
+    }
+
     // We can load N elements at a time if:
     //  1. Every group of N source pointers are contiguous.  For example, if
     //     N=2, then the pointers should be [x, x+1, y, y+1, ...].
@@ -1173,6 +1180,10 @@ struct AsyncCopyGlobalToLocalOpConversion
     //     mask bits are the same.  For example if N=2, the mask must be
     //     [x, x, y, y, ...].
     unsigned maxVec = getContiguity(op.getSrc());
+    auto copyVec = cvt.getNumConsecutiveInOut();
+    //    maxVec = copyVec;
+    assert(maxVec == copyVec);
+
     if (mask) {
       maxVec = std::min(maxVec, getMaskAlignment(mask));
     }
@@ -1239,12 +1250,6 @@ struct AsyncCopyGlobalToLocalOpConversion
     // %dst
     auto smemObj =
         getSharedMemoryObjectFromStruct(loc, llDst, resElemTy, rewriter);
-    auto smemLayout = ttg::toLinearLayout(dstTy);
-    auto cvt = srcLayout.invertAndCompose(smemLayout);
-    if (!cvt.isTrivialOver({str_attr("block")})) {
-      return emitError(loc,
-                       "cp.async does not support non-trivial block dimension");
-    }
     cvt = cvt.sublayout(
         {str_attr("register"), str_attr("lane"), str_attr("warp")},
         {str_attr("offset")});
