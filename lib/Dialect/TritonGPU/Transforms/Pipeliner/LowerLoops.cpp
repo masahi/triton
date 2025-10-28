@@ -453,9 +453,9 @@ scf::ForOp lowerLoads(scf::ForOp forOp, CoarseSchedule &schedule,
         continue;
       }
       SharedEncodingTrait sharedEncoding;
-      bool canUseAsyncCp =
+      bool useAsyncCp =
           triton::isPipeliningBeneficial(&op, axisInfoAnalysis);
-      if (canUseAsyncCp) {
+      if (useAsyncCp) {
         if (!isa<RankedTensorType>(op.getResultTypes()[0])) {
           sharedEncoding = ttg::SwizzledSharedEncodingAttr::get(
               forOp.getContext(), 1, 1, 1, {0},
@@ -465,7 +465,7 @@ scf::ForOp lowerLoads(scf::ForOp forOp, CoarseSchedule &schedule,
           sharedEncoding = getSharedEncoding(&op);
         }
       }
-      if (canUseAsyncCp || isTMALoad(&op)) {
+      if (useAsyncCp || isTMALoad(&op)) {
         if (loadRequiresAdditionalBuffer(&op)) {
           // Allocate additional buffer required by the wgmma pipelining.
           stageDiff += 1;

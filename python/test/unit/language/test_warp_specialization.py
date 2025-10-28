@@ -659,7 +659,7 @@ def indirect_matmul_kernel(
     B_ptrs = B + m_offs
 
     acc = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
-    for k in tl.range(0, K, BLOCK_K, warp_specialize=False):
+    for k in tl.range(0, K, BLOCK_K, warp_specialize=True):
         idx = tl.load(index_ptrs)
 
         a = tl.load(A_ptrs + idx[:, None] * stride_a1)
