@@ -528,11 +528,10 @@ public:
               isDescLoadAndAlloc<TMEMAllocOp>(op->getResult(0)) ||
               isGlobalLoadAndAlloc<LocalAllocOp>(op->getResult(0)) ||
               isGlobalLoadAndAlloc<TMEMAllocOp>(op->getResult(0)) ||
-              (allowRegUse &&
-               (isa<triton::DescriptorOpInterface, LoadOp>(op)))) {
+              (allowRegUse && isa<triton::DescriptorOpInterface, LoadOp>(op) &&
+               op->hasAttr(kLoopStageAttrName))) {
             ops.push_back(op);
             auto stage = getStage(op);
-            assert(stage);
             loadMaxStage = std::max<int>(loadMaxStage, *stage);
           } else if (isa<LocalAllocOp>(op)) {
             ops.push_back(op);
