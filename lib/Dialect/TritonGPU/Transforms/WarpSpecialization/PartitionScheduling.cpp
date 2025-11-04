@@ -837,8 +837,12 @@ SmallVector<SetVector<int>> getYieldPartitions(Block *block) {
       // At the moment token must have only one use
       auto arg = forOp.getRegionIterArg(opnd->getOperandNumber());
       assert(arg.hasOneUse());
-      op = arg.getUses().begin()->getOwner();
-      if (isa<scf::ForOp, triton::ReduceOp>(op)) {
+      auto tokenUse = arg.getUses().begin();
+      op = tokenUse->getOwner();
+      if (auto innerFor = dyn_cast<scf::ForOp>(op)) {
+        pos = tokenUse->getOperandNumber() - innerFor.getNumControlOperands();
+      } else if (isa<scf::ReduceOp>(op)) {
+        // TODO: is this correct?
         pos = arg.getArgNumber();
       }
     } else if (op && op->getNumRegions() > 0) {
@@ -862,6 +866,7 @@ SmallVector<SetVector<int>> getYieldPartitions(Block *block) {
         }
       }
     }
+    assert(yieldPartitions.size() > opnd->getOperandNumber());
     yieldPartitions[opnd->getOperandNumber()] = *partitionIds;
   }
   return yieldPartitions;
@@ -1187,7 +1192,7 @@ void PartitionScheduling::runOnOperation() {
           mlir::replaceAllUsesInRegionWith(tok, loop.getRegionIterArgs().back(),
                                            loop.getRegion());
           appendToForOpYield(loop, {lastTok});
-          assignSingleRegionOpPartition(loop);
+	  assignSingleRegionOpPartition(loop);
         }
       }
     }
