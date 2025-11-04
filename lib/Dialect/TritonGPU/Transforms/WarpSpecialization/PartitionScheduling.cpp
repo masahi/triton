@@ -1179,6 +1179,7 @@ void PartitionScheduling::runOnOperation() {
           }
 
           alloc->moveBefore(loop);
+	  alloc->removeAttr(kPartitionAttrName);
 
           // Thread the token across loop nests
           OpBuilder builder(loop);
