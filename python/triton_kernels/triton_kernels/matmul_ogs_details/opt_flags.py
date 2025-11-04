@@ -167,7 +167,6 @@ def make_default_opt_flags_amd(
         arch=None,
         flatten=True,
         target_kernel_kwargs=target_kernel_kwargs,
-        flatten=True,
     )
     # check constraints
     all_constraints_satisfied(ret, constraints)
