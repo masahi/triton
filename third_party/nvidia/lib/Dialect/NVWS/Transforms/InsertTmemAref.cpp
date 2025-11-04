@@ -532,7 +532,7 @@ LogicalResult insertTmemAref(TmemAccessDag &accessDag) {
   auto allocOp = cast<TMEMAllocOp>(rootNode->op);
 
   // do nothing for alloc with src, whose user is in the same partition
-  if (allocOp.getSrc() && rootNode->user->partitionId == rootNode->partitionId)
+  if (allocOp.getSrc() && !allocOp.getToken() && rootNode->user->partitionId == rootNode->partitionId)
     return success();
 
   std::optional<bool> isMultiStaged;
