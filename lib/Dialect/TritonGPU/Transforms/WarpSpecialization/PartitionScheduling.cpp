@@ -841,9 +841,6 @@ SmallVector<SetVector<int>> getYieldPartitions(Block *block) {
       op = tokenUse->getOwner();
       if (auto innerFor = dyn_cast<scf::ForOp>(op)) {
         pos = tokenUse->getOperandNumber() - innerFor.getNumControlOperands();
-      } else if (isa<scf::ReduceOp>(op)) {
-        // TODO: is this correct?
-        pos = arg.getArgNumber();
       }
     } else if (op && op->getNumRegions() > 0) {
       // if producer is a regioned op, get positional result index

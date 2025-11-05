@@ -459,6 +459,7 @@ bool insertArefs(PartitionBuilder &builder, scf::ForOp loop,
   ArefCreateOp aref;
   {
     OpBuilder::InsertionGuard g(builder);
+    // TODO: stop when warp_specialize is set
     scf::ForOp topLevelFor = loop;
     while (auto outer = topLevelFor->getParentOfType<scf::ForOp>()) {
       topLevelFor = outer;
