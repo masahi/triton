@@ -97,7 +97,9 @@ static bool hasDefPartition(scf::ForOp loop, Operation *op,
     Operation *op = worklist.pop_back_val();
     if (!seen.insert(op).second)
       continue;
-    auto partitionIds = getPartitionIds(op);
+    std::optional<SetVector<int>> partitionIds;
+    if (hasPartition(op))
+      partitionIds = getPartitionIds(op);
     if (partitionIds && partitionIds->size() != partitions.getNumPartitions())
       return true;
     iterateDefs(loop, op,
@@ -297,8 +299,8 @@ SetVector<Partition *> getInitialPartitions(scf::ForOp loop,
   if (!loop->hasAttr(kWarpSpecializeAttrName)) {
     SetVector<Partition *> bodyPartitons;
     for (Operation &op : loop.getOps()) {
-      if (auto ids = getPartitionIds(&op)) {
-        for (auto id : *ids) {
+      if (hasPartition(&op)) {
+        for (auto id : getPartitionIds(&op)) {
           bodyPartitons.insert(partitions.getPartition(id));
         }
       }
@@ -439,10 +441,11 @@ void propagatePartitions(scf::ForOp loop, PartitionSet &partitions) {
     // Look at the definitions directly feeding into this operation.
     iterateDefs(loop, op, [&](OpResult def) {
       Operation *defOp = def.getDefiningOp();
-      if (auto partitionIds = getPartitionIds(defOp)) {
+      if (hasPartition(defOp)) {
+        auto partitionIds = getPartitionIds(defOp);
         // The input originates from an operation already assigned to a
         // partition. Add this as a def partition.
-        for (auto id : *partitionIds) {
+        for (auto id : partitionIds) {
           cluster->defPartitions.insert(partitions.getPartition(id));
         }
       } else {
@@ -466,10 +469,11 @@ void propagatePartitions(scf::ForOp loop, PartitionSet &partitions) {
     });
     // Check the users of the operation.
     iterateUsers(loop, op, [&](Operation *user) {
-      if (auto partitionIds = getPartitionIds(user)) {
+      if (hasPartition(user)) {
+        auto partitionIds = getPartitionIds(user);
         // If the user is already assigned to a partition, add that partition as
         // one of the sink partitions.
-        for (auto id : *partitionIds) {
+        for (auto id : partitionIds) {
           cluster->sinkPartitions.insert(partitions.getPartition(id));
         }
         return;
@@ -564,9 +568,9 @@ void rematerializeBroadcasts(PartitionSet &partitions, OpOperand *use) {
   Operation *defOp = use->get().getDefiningOp();
   while (isa_and_nonnull<BroadcastOp, ExpandDimsOp>(defOp)) {
     Operation *clone = OpBuilder(defOp).clone(*defOp);
+    assert(hasPartition(use->getOwner()) && "user not scheduled");
     auto userPartitionIds = getPartitionIds(use->getOwner());
-    assert(userPartitionIds && "user not scheduled");
-    for (auto id : *userPartitionIds) {
+    for (auto id : userPartitionIds) {
       Partition *userPartition = partitions.getPartition(id);
       setPartition(clone, userPartition);
     }
@@ -643,19 +647,19 @@ LogicalResult assignMissingPartitions(scf::ForOp loop,
     bool hasSIMT = false;
     for (auto users : allocOp.getResult().getUsers()) {
       if (auto mma = dyn_cast<ttng::MMAv5OpInterface>(users)) {
-        if (auto pid = getPartitionIds(mma)) {
-          mmaPartitionId = pid->front();
+        if (hasPartition(mma)) {
+          mmaPartitionId = getPartitionIds(mma).front();
         }
       } else if (auto storeOp = dyn_cast<ttng::TMEMStoreOp>(users)) {
         hasSIMT = true;
-        if (auto pid = getPartitionIds(storeOp)) {
-          storePartitionId = pid->front();
+        if (hasPartition(storeOp)) {
+          storePartitionId = getPartitionIds(storeOp).front();
         }
       } else {
         auto loadOp = cast<ttng::TMEMLoadOp>(users);
         hasSIMT = true;
-        if (auto pid = getPartitionIds(loadOp)) {
-          loadPartitionId = pid->front();
+        if (hasPartition(loadOp)) {
+          loadPartitionId = getPartitionIds(loadOp).front();
         }
       }
     }
@@ -697,8 +701,9 @@ LogicalResult assignMissingPartitions(scf::ForOp loop,
       return WalkResult::advance();
 
     DenseSet<int> ids;
-    if (auto partitionIds = getPartitionIds(op)) {
-      ids.insert(partitionIds->begin(), partitionIds->end());
+    if (hasPartition(op)) {
+      auto partitionIds = getPartitionIds(op);
+      ids.insert(partitionIds.begin(), partitionIds.end());
     }
     partitionMap[op] = ids;
 
@@ -826,16 +831,15 @@ SetVector<int> getBlockPartitions(Block *block);
 SmallVector<SetVector<int>> getYieldPartitions(Block *block) {
   auto terminator = block->getTerminator();
   SmallVector<SetVector<int>> yieldPartitions(terminator->getNumOperands());
-  for (auto &opnd_ : terminator->getOpOperands()) {
-    auto opnd = &opnd_;
-    auto op = opnd->get().getDefiningOp();
+  for (auto &opnd : terminator->getOpOperands()) {
+    auto op = opnd.get().getDefiningOp();
     std::optional<int> pos;
     if (auto forOp = dyn_cast<scf::ForOp>(block->getParentOp());
-        forOp && isa<AsyncTokenType>(opnd->get().getType())) {
+        forOp && isa<AsyncTokenType>(opnd.get().getType())) {
       // Heuristic: when for-op yields an async-token, the output partition of
       //            the token is that of its user.
       // At the moment token must have only one use
-      auto arg = forOp.getRegionIterArg(opnd->getOperandNumber());
+      auto arg = forOp.getRegionIterArg(opnd.getOperandNumber());
       assert(arg.hasOneUse());
       auto tokenUse = arg.getUses().begin();
       op = tokenUse->getOwner();
@@ -844,14 +848,22 @@ SmallVector<SetVector<int>> getYieldPartitions(Block *block) {
       }
     } else if (op && op->getNumRegions() > 0) {
       // if producer is a regioned op, get positional result index
-      auto it = llvm::find(op->getResults(), opnd->get());
+      auto it = llvm::find(op->getResults(), opnd.get());
       assert(it != op->getResults().end());
       pos = it - op->getResults().begin();
     }
     if (!op)
       continue;
-    auto partitionIds =
-        pos ? getPartitionOutputs(op)[*pos] : getPartitionIds(op);
+    std::optional<SetVector<int>> partitionIds;
+    if (hasPartition(op)) {
+      partitionIds = getPartitionIds(op);
+    }
+    if (op->getNumRegions() > 0) {
+      auto it = llvm::find(op->getResults(), opnd.get());
+      assert(it != op->getResults().end());
+      auto pos = it - op->getResults().begin();
+      partitionIds = getPartitionOutputs(op)[pos];
+    }
     if (!partitionIds) {
       // inherit from uses
       partitionIds = SetVector<int>();
@@ -859,12 +871,12 @@ SmallVector<SetVector<int>> getYieldPartitions(Block *block) {
         if (auto op1 = block->findAncestorOpInBlock(*user);
             op1 && hasPartition(op1)) {
           auto ids = getPartitionIds(op1);
-          partitionIds->insert(ids->begin(), ids->end());
+          partitionIds->insert(ids.begin(), ids.end());
         }
       }
     }
-    assert(yieldPartitions.size() > opnd->getOperandNumber());
-    yieldPartitions[opnd->getOperandNumber()] = *partitionIds;
+    assert(yieldPartitions.size() > opnd.getOperandNumber());
+    yieldPartitions[opnd.getOperandNumber()] = *partitionIds;
   }
   return yieldPartitions;
 }
@@ -928,8 +940,9 @@ SetVector<int> getBlockPartitions(Block *block) {
       partitionIds = assignIfOpPartitions(ifOp);
     } else if (isa<scf::ForOp, triton::ReduceOp>(op)) {
       partitionIds = assignSingleRegionOpPartition(op);
-    } else if (auto ids = getPartitionIds(op)) {
-      partitionIds.insert(ids->begin(), ids->end());
+    } else if (hasPartition(op)) {
+      auto ids = getPartitionIds(op);
+      partitionIds.insert(ids.begin(), ids.end());
     }
     blockPartitions.insert(partitionIds.begin(), partitionIds.end());
   }
@@ -943,13 +956,15 @@ void assignRegionBodyPartition(scf::ForOp loop, PartitionSet &partitions) {
 
     auto parentOp =
         op->getParentOfType<scf::ForOp>().getBody()->findAncestorOpInBlock(*op);
-    if (auto partitionIds = triton::gpu::getPartitionIds(parentOp)) {
-      SetVector<Partition *> parentPartitions;
-      for (auto id : *partitionIds) {
-        parentPartitions.insert(partitions.getPartition(id));
-      }
-      setPartition(op, parentPartitions);
+    if (!hasPartition(parentOp))
+      return WalkResult::advance();
+
+    auto partitionIds = getPartitionIds(parentOp);
+    SetVector<Partition *> parentPartitions;
+    for (auto id : partitionIds) {
+      parentPartitions.insert(partitions.getPartition(id));
     }
+    setPartition(op, parentPartitions);
     return WalkResult::advance();
   });
 
@@ -985,8 +1000,7 @@ void assignRegionOpPartitions(scf::ForOp loop) {
       return WalkResult::advance();
     auto parentOp = op->getParentOp();
     auto parentPartitionIds = getPartitionIds(parentOp);
-    assert(parentPartitionIds);
-    setPartition(op, *parentPartitionIds);
+    setPartition(op, parentPartitionIds);
     return WalkResult::advance();
   });
 }
@@ -1001,9 +1015,10 @@ public:
       return failure();
     }
 
+    // TODO: Check if inside a WS loop
+
     for (auto user : alloc->getUsers()) {
       if (auto store = dyn_cast<ttng::TMEMStoreOp>(user)) {
-        auto storePartition = getPartitionIds(store);
         auto storeSrc = store.getSrc();
         if (auto storeSrcDef = storeSrc.getDefiningOp()) {
           DominanceInfo dom(storeSrcDef);
@@ -1018,11 +1033,11 @@ public:
             if (auto storeTok = store.getToken()) {
               storeTok.replaceAllUsesWith(newAlloc.getToken());
             }
-            rewriter.eraseOp(store);
-            rewriter.replaceOp(alloc, newAlloc);
-            if (storePartition) {
-              setPartition(newAlloc, *storePartition);
+            if (hasPartition(store)) {
+              setPartition(newAlloc, getPartitionIds(store));
             }
+	    rewriter.eraseOp(store);
+            rewriter.replaceOp(alloc, newAlloc);
             return success();
           }
         }
@@ -1113,12 +1128,17 @@ void hoistTmemAlloc(ttng::TMEMAllocOp allocToHoist) {
     forOp = addIterArgsToLoop(b, forOp, {token});
 
     // update partitions for the forOp
-    auto partitionOuputs = getPartitionOutputs(forOp);
-    partitionOuputs.push_back(tokenPartition);
-    setPartitionOutputs(forOp, partitionOuputs);
-    auto partitions = *getPartitionIds(forOp);
+    if (forOp->hasAttr(kPartitionOutputsAttrName)) {
+      auto partitionOuputs = getPartitionOutputs(forOp);
+      partitionOuputs.push_back(tokenPartition);
+      setPartitionOutputs(forOp, partitionOuputs);
+    } else {
+      setPartitionOutputs(forOp, {tokenPartition});
+    }
+    auto partitions = getPartitionIds(forOp);
     partitions.insert(tokenPartition.begin(), tokenPartition.end());
     setPartition(forOp, partitions);
+
     token = forOp.getRegionIterArg(nArgs);
   }
 
@@ -1144,14 +1164,13 @@ void hoistTmemAlloc(ttng::TMEMAllocOp allocToHoist) {
   std::reverse(loopNest.begin(), loopNest.end());
   for (auto forOp : loopNest) {
     appendToForOpYield(forOp, {token});
-    setPartition(forOp.getBody()->getTerminator(), *getPartitionIds(forOp));
+    setPartition(forOp.getBody()->getTerminator(), getPartitionIds(forOp));
     token = forOp->getResults().back();
   }
 }
 
 void PartitionScheduling::runOnOperation() {
   ModuleOp m = getOperation();
-
   SmallVector<scf::ForOp> loops;
 
   m.walk([&](scf::ForOp loop) {

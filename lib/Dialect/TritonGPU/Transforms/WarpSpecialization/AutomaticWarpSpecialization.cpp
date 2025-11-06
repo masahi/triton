@@ -39,7 +39,6 @@ void AutomaticWarpSpecialization::runOnOperation() {
   pm.addPass(createTritonGPUPartitionScheduling());
   pm.addPass(createNVWSInsertAref());
   pm.addPass(createNVWSInsertTmemAref());
-  pm.addPass(createTritonGPURewritePartitionDependencies());
   // `int-range-optimizations` and SCCP are good at cleaning up loop arithmetic.
   // FIXME: Re-enable integer range analysis once it is fixed.
   // pm.addPass(arith::createIntRangeOptimizationsPass());
@@ -52,9 +51,10 @@ void AutomaticWarpSpecialization::runOnOperation() {
   if (failed(runPipeline(pm, getOperation())))
     return signalPassFailure();
 
-  // Multi-buffer TMA descriptors. We cannot rely on SWP to do it, to support
-  // desc updates in nested loops.
   {
+    // Multi-buffer TMA descriptors. We cannot rely on SWP to do it, to support
+    // desc updates in nested loops.
+    // TODO: should only apply to make_tensor_descriptor inside WS loop
     SetVector<scf::ForOp> descUpdateLoops;
     getOperation().walk([&](triton::MakeTensorDescOp op) {
       if (auto forOp = op->getParentOfType<scf::ForOp>()) {
