@@ -1080,6 +1080,75 @@ struct PartitionScheduling
 };
 } // namespace
 
+void hoistTmemAlloc(ttng::TMEMAllocOp allocToHoist) {
+  // extra loop nest
+  SmallVector<scf::ForOp> loopNest;
+  auto currentForOp = allocToHoist->getParentOfType<scf::ForOp>();
+  while (currentForOp && !currentForOp->hasAttr(kWarpSpecializeAttrName)) {
+    loopNest.push_back(currentForOp);
+    currentForOp = currentForOp->getParentOfType<scf::ForOp>();
+  }
+
+  if (!currentForOp) {
+    return;
+  }
+  loopNest.push_back(currentForOp);
+
+  // hoist to outside tt.warp_specialized loop
+  allocToHoist->moveBefore(currentForOp);
+  allocToHoist->removeAttr(kPartitionAttrName);
+
+  Value token = allocToHoist.getToken();
+  assert(token.hasOneUse());
+  auto &tokenUse = *token.getUses().begin();
+  auto tokenPos =
+      tokenUse.getOperandNumber() - currentForOp.getNumControlOperands();
+  auto tokenPartition = getPartitionOutputs(tokenUse.getOwner())[tokenPos];
+
+  // thread token to for-op init/iter args from outer-to inner
+  std::reverse(loopNest.begin(), loopNest.end());
+  for (auto &forOp : loopNest) {
+    OpBuilder b(forOp);
+    int nArgs = forOp.getRegionIterArgs().size();
+    forOp = addIterArgsToLoop(b, forOp, {token});
+
+    // update partitions for the forOp
+    auto partitionOuputs = getPartitionOutputs(forOp);
+    partitionOuputs.push_back(tokenPartition);
+    setPartitionOutputs(forOp, partitionOuputs);
+    auto partitions = *getPartitionIds(forOp);
+    partitions.insert(tokenPartition.begin(), tokenPartition.end());
+    setPartition(forOp, partitions);
+    token = forOp.getRegionIterArg(nArgs);
+  }
+
+  // set inner loop init_args with updated token
+  tokenUse.set(token);
+
+  // get last produced token, the one w/o use
+  token = tokenUse.getOwner()->getResult(tokenPos);
+  while (!token.use_empty()) {
+    assert(token.hasOneUse());
+    auto tokenUser = *token.getUsers().begin();
+    if (auto load = dyn_cast<ttng::TMEMLoadOp>(tokenUser)) {
+      token = load.getToken();
+    } else if (auto store = dyn_cast<ttng::TMEMStoreOp>(tokenUser)) {
+      token = store.getToken();
+    } else {
+      auto mma = cast<ttng::MMAv5OpInterface>(tokenUser);
+      token = mma.getToken();
+    }
+  }
+
+  // append token to yield, from inner to outer loop
+  std::reverse(loopNest.begin(), loopNest.end());
+  for (auto forOp : loopNest) {
+    appendToForOpYield(forOp, {token});
+    setPartition(forOp.getBody()->getTerminator(), *getPartitionIds(forOp));
+    token = forOp->getResults().back();
+  }
+}
+
 void PartitionScheduling::runOnOperation() {
   ModuleOp m = getOperation();
 
@@ -1126,71 +1195,14 @@ void PartitionScheduling::runOnOperation() {
     if (loop->hasAttr(kWarpSpecializeAttrName)) {
       SmallVector<ttng::TMEMAllocOp> tmemAllocToHoist;
       loop.walk([&](ttng::TMEMAllocOp tmemAlloc) {
-        if (!loop.getOps<scf::ForOp>().empty() &&
-            tmemAlloc->getParentOfType<scf::ForOp>() == loop &&
-	    tmemAlloc.getSrc() &&
-	    canRemoveTmemStore(tmemAlloc)) {
-          // For simplicity, only handle one additional level of hoisting. This
-          // is sufficient for a typical persistent kernel whose outermost loop
-          // is over output tiles.
+        if (tmemAlloc.getSrc() && canRemoveTmemStore(tmemAlloc)) {
           // TODO: check if hoisting is safe
           tmemAllocToHoist.push_back(tmemAlloc);
         }
       });
 
       for (auto alloc : tmemAllocToHoist) {
-        auto tok = alloc.getToken();
-        if (!tok) {
-          alloc->moveBefore(loop);
-        } else {
-          auto tokUsers = tok.getUsers();
-          if (tokUsers.empty()) {
-            return;
-          }
-
-          Value lastTok;
-
-          while (!tokUsers.empty()) {
-            auto tokUser = *tokUsers.begin();
-
-            Value newTok;
-            if (auto load = dyn_cast<ttng::TMEMLoadOp>(tokUser)) {
-              newTok = load.getToken();
-            }
-            if (auto store = dyn_cast<ttng::TMEMStoreOp>(tokUser)) {
-              newTok = store.getToken();
-            } else if (auto mma = dyn_cast<ttng::MMAv5OpInterface>(tokUser)) {
-              newTok = mma.getToken();
-            } else if (auto innerFor = dyn_cast<scf::ForOp>(tokUser)) {
-              auto tokenVarIdx = tok.getUses().begin()->getOperandNumber() -
-                                 innerFor.getNumControlOperands();
-              newTok = innerFor.getResult(tokenVarIdx);
-            }
-
-            if (!newTok) {
-              break;
-            }
-
-            tokUsers = newTok.getUsers();
-            lastTok = newTok;
-          }
-
-          if (!lastTok) {
-            // Unhandled case, skip hoisting
-            continue;
-          }
-
-          alloc->moveBefore(loop);
-	  alloc->removeAttr(kPartitionAttrName);
-
-          // Thread the token across loop nests
-          OpBuilder builder(loop);
-          loop = addIterArgsToLoop(builder, loop, {tok});
-          mlir::replaceAllUsesInRegionWith(tok, loop.getRegionIterArgs().back(),
-                                           loop.getRegion());
-          appendToForOpYield(loop, {lastTok});
-	  assignSingleRegionOpPartition(loop);
-        }
+        hoistTmemAlloc(alloc);
       }
     }
   });
