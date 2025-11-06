@@ -693,6 +693,7 @@ def group_gemm_tma_fn(group_A, group_B):
                                           NUM_SM=4,
                                           num_stages=3)
     assert "ttg.warp_specialize" in out.asm["ttgir"]
+    # print(out.asm["ttgir"])
     return group_C
 
 
@@ -702,6 +703,7 @@ def group_gemm_tma_fn(group_A, group_B):
 @pytest.mark.parametrize("group_size", [4, 8, 16])
 @pytest.mark.skipif(not is_blackwell(), reason="Requires Blackwell")
 def test_grouped_gemm(M, N, K, group_size):
+    torch.manual_seed(42)
     group_A = []
     group_B = []
     group_B_T = []
@@ -724,3 +726,4 @@ def test_grouped_gemm(M, N, K, group_size):
 # test_warp_specialize_tma_matmul_persistent(1024, 1024, 1024, 128, 128, 128, 3, 4, True, False)
 # test_warp_specialize_attention_persistent_forward(8192, 8192, 64, 64, 2, True, 4, True)
 # test_warp_specialize_attention_forward(1024, 1024, 128, 128, 3, False, 4, True)
+test_grouped_gemm(128, 256, 128, 4)
