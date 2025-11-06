@@ -329,15 +329,15 @@ void cloneOpsInBlock(Block *block, SmallVector<WarpGroupBuilder> &builders,
           }
         }
 
-        assert(!newOperandIndices.empty());
-
         SmallVector<Value> newYieldOperands;
         for (size_t i : newOperandIndices) {
           newYieldOperands.push_back(
               builder.mapping.lookupOrDefault(yieldOp.getOperand(i)));
         }
 
-        builder.create<scf::YieldOp>(op->getLoc(), newYieldOperands);
+        if (!newYieldOperands.empty()) {
+          builder.create<scf::YieldOp>(op->getLoc(), newYieldOperands);
+        }
       }
     } else {
       assert(hasPartition(op));
