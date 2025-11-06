@@ -316,7 +316,7 @@ class Case:
 @pytest.mark.parametrize("has_y_gammas", [False, True])
 @pytest.mark.parametrize("is_persistent", [False, True])
 @pytest.mark.parametrize("flatten", [False, True])
-def test_op(m, n, k, split_k, do_gather, do_scatter, fused_scatter, inner_expt_opt, has_y_gammas, is_persistent, flatten, n_expts_tot,
+def test_op(m, n, k, split_k, do_gather, do_scatter, inner_expt_opt, has_y_gammas, is_persistent, flatten, n_expts_tot,
             n_expts_act, mode, act_dtype_str, weight_dtype_str, block_m, hbm_swizzling, colmajor_mxfp_weight, epilogue_subtile,
             x_transpose, w_transpose, y_transpose,
             device, opt_flags_scope):
@@ -327,7 +327,7 @@ def test_op(m, n, k, split_k, do_gather, do_scatter, fused_scatter, inner_expt_o
     # the frame that called pytest.skip, including all the tensors, leading to OOM.
     skip_message = None
     try:
-        _test_op(m, n, k, split_k, do_gather, do_scatter, fused_scatter, inner_expt_opt, has_y_gammas, is_persistent, flatten, n_expts_tot,
+        _test_op(m, n, k, split_k, do_gather, do_scatter, inner_expt_opt, has_y_gammas, is_persistent, flatten, n_expts_tot,
                  n_expts_act, mode, act_dtype_str, weight_dtype_str, block_m, hbm_swizzling, colmajor_mxfp_weight, epilogue_subtile,
                  x_transpose, w_transpose, y_transpose,
                  device, opt_flags_scope)
@@ -337,7 +337,7 @@ def test_op(m, n, k, split_k, do_gather, do_scatter, fused_scatter, inner_expt_o
     if skip_message is not None:
         pytest.skip(skip_message)
 
-def _test_op(m, n, k, split_k, do_gather, do_scatter, fused_scatter, inner_expt_opt, has_y_gammas, is_persistent, flatten, n_expts_tot,
+def _test_op(m, n, k, split_k, do_gather, do_scatter, inner_expt_opt, has_y_gammas, is_persistent, flatten, n_expts_tot,
             n_expts_act, mode, act_dtype_str, weight_dtype_str, block_m, hbm_swizzling, colmajor_mxfp_weight, epilogue_subtile,
             x_transpose, w_transpose, y_transpose,
             device, opt_flags_scope):
