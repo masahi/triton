@@ -54,11 +54,14 @@ void AutomaticWarpSpecialization::runOnOperation() {
   {
     // Multi-buffer TMA descriptors. We cannot rely on SWP to do it, to support
     // desc updates in nested loops.
-    // TODO: should only apply to make_tensor_descriptor inside WS loop
     SetVector<scf::ForOp> descUpdateLoops;
-    getOperation().walk([&](triton::MakeTensorDescOp op) {
-      if (auto forOp = op->getParentOfType<scf::ForOp>()) {
-        descUpdateLoops.insert(forOp);
+    getOperation().walk([&](scf::ForOp loop) {
+      if (loop->hasAttr(kWarpSpecializeAttrName)) {
+        loop.walk([&](triton::MakeTensorDescOp op) {
+          if (auto forOp = op->getParentOfType<scf::ForOp>()) {
+            descUpdateLoops.insert(forOp);
+          }
+        });
       }
     });
 

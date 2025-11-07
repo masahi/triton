@@ -1010,17 +1010,35 @@ void assignRegionOpPartitions(scf::ForOp loop) {
   });
 }
 
+bool underWSLoop(Operation *op) {
+  scf::ForOp topLevelFor = op->getParentOfType<scf::ForOp>();
+  if (!topLevelFor) {
+    return false;
+  }
+
+  if (topLevelFor->hasAttr(kWarpSpecializeAttrName)) {
+    return true;
+  } else {
+    while (auto outer = topLevelFor->getParentOfType<scf::ForOp>()) {
+      topLevelFor = outer;
+      if (outer->hasAttr(kWarpSpecializeAttrName)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 class FoldTmemStoreIntoAlloc : public OpRewritePattern<ttng::TMEMAllocOp> {
 public:
   using OpRewritePattern::OpRewritePattern;
 
   LogicalResult matchAndRewrite(ttng::TMEMAllocOp alloc,
                                 PatternRewriter &rewriter) const override {
-    if (alloc.getSrc()) {
+    if (alloc.getSrc() || !underWSLoop(alloc)) {
       return failure();
     }
-
-    // TODO: Check if inside a WS loop
 
     for (auto user : alloc->getUsers()) {
       if (auto store = dyn_cast<ttng::TMEMStoreOp>(user)) {
