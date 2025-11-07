@@ -26,7 +26,7 @@ def _matmul_launch_metadata(grid, kernel, args):
         WS = args["WARP_SPECIALIZE"]
         ws_str = "_ws" if WS else ""
     else:
-        ws_str = "_nvws"
+        ws_str = ""
     ret["name"] = f"{kernel.name}{ws_str} [M={M}, N={N}, K={K}]"
     if "c_ptr" in args:
         bytes_per_elem = args["c_ptr"].element_size()
@@ -241,7 +241,7 @@ def bench(K, dtype, ws=False, reps=10000, warmup_reps=10000):
     bench_fn(reps, warmup_reps, matmul_tma_persistent, a, b)
 
     if ws:
-        bench_fn(reps, warmup_reps, matmul_tma_persistent, a, b, True, False)  # main ws
+        bench_fn(reps, warmup_reps, matmul_tma_persistent, a, b, True)
 
 
 def validate(M, N, K, dtype):
@@ -250,7 +250,7 @@ def validate(M, N, K, dtype):
     b = b.T.contiguous()
 
     cublas_result = cublas_matmul(a, b) if cublas is not None else None
-    tma_persistent_result = matmul_tma_persistent(a, b, False, nvws=True)
+    tma_persistent_result = matmul_tma_persistent(a, b, False)
 
     naive_vs_tma_persistent = (
         "✅"
