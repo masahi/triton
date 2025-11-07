@@ -1206,9 +1206,8 @@ bool canProveExecuteOnce(scf::ForOp forOp) {
     unsigned bitWidth = ConstantIntRanges::getStorageBitwidth(v.getType());
     APInt min = APInt::getSignedMinValue(bitWidth);
     APInt max = APInt::getSignedMaxValue(bitWidth);
-    APInt apVal;
     if (auto cst = getConstantIntValue(getAsOpFoldResult(v))) {
-      apVal = {bitWidth, static_cast<uint64_t>(*cst), /*signed*/ true};
+      APInt apVal = {bitWidth, static_cast<uint64_t>(*cst), /*signed*/ true};
       return mlir::ConstantIntRanges::constant(apVal);
     } else if (auto assumedBound = getAssumedBound(v, min, max, bitWidth)) {
       return *assumedBound;
