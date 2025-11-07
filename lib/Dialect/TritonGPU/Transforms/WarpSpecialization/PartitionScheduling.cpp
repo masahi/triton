@@ -5,6 +5,8 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/Matchers.h"
+#include "mlir/Interfaces/InferIntRangeInterface.h"
+#include "mlir/Interfaces/Utils/InferIntRangeCommon.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/WalkResult.h"
@@ -1126,6 +1128,102 @@ struct PartitionScheduling
 };
 } // namespace
 
+bool canProveExecuteOnce(scf::ForOp forOp) {
+  auto getBoundFromCmpOp =
+      [](arith::CmpIOp cmpOp, APInt min, APInt max, unsigned bitWidth,
+         bool anchorIsLhs) -> std::optional<ConstantIntRanges> {
+    // The following was taken from third_party/amd/lib/Analysis/
+    auto fold =
+        getAsOpFoldResult(anchorIsLhs ? cmpOp.getRhs() : cmpOp.getLhs());
+    if (auto constValue = getConstantIntValue(fold)) {
+      bool isSigned = true;
+      APInt apVal = {bitWidth, static_cast<uint64_t>(*constValue), isSigned};
+      switch (cmpOp.getPredicate()) {
+      case arith::CmpIPredicate::eq:
+        return mlir::ConstantIntRanges::constant(apVal);
+      case arith::CmpIPredicate::sge: {
+        // K >= apVal implies K ∈ [apVal, max]
+        if (anchorIsLhs)
+          return mlir::ConstantIntRanges::range(apVal, max, isSigned);
+        // apVal >= K implies K ∈ [min, apVal]
+        return mlir::ConstantIntRanges::range(min, apVal, isSigned);
+      }
+      case arith::CmpIPredicate::sgt: {
+        // K > apVal implies K >= apVal + 1 implies K ∈ [apVal + 1, max]
+        if (anchorIsLhs) {
+          return mlir::ConstantIntRanges::range(apVal + 1, max, isSigned);
+        }
+        // apVal > K implies apVal - 1 >= K implies K ∈ [min, apVal - 1]
+        return mlir::ConstantIntRanges::range(min, apVal - 1, isSigned);
+      }
+      case arith::CmpIPredicate::sle: {
+        // K <= apVal implies K ∈ [min, apVal]
+        if (anchorIsLhs)
+          return mlir::ConstantIntRanges::range(min, apVal, isSigned);
+        // apVal <= K implies K ∈ [apVal, max]
+        return mlir::ConstantIntRanges::range(apVal, max, isSigned);
+      }
+      case arith::CmpIPredicate::slt: {
+        // K < apVal implies K <= apVal -1 implies K ∈ [min, apVal - 1]
+        if (anchorIsLhs)
+          return mlir::ConstantIntRanges::range(min, apVal - 1, isSigned);
+        // apVal < K implies apVal + 1 <= K implies K ∈ [apVal + 1, max]
+        return mlir::ConstantIntRanges::range(apVal + 1, max, isSigned);
+      }
+      default:
+        break;
+      }
+    }
+    return std::nullopt;
+  };
+
+  auto getAssumedBound =
+      [&](Value v, APInt min, APInt max,
+          unsigned bitWidth) -> std::optional<ConstantIntRanges> {
+    mlir::ForwardSliceOptions opt;
+    SetVector<Operation *> slice;
+    (void)getForwardSlice(v, &slice, opt);
+
+    // For simplicity, we only handle an assume op directly operating on v. It's
+    // possible to support more general cases, but they require a range analysis.
+    for (auto op : slice) {
+      if (auto assumeOp = dyn_cast<LLVM::AssumeOp>(op)) {
+        auto cond = assumeOp.getCond();
+        if (auto cmpOp = cond.getDefiningOp<arith::CmpIOp>();
+            cmpOp && (cmpOp.getLhs() == v || cmpOp.getRhs() == v)) {
+          bool anchorIsLhs = cmpOp.getLhs() == v;
+          if (auto bound =
+                  getBoundFromCmpOp(cmpOp, min, max, bitWidth, anchorIsLhs)) {
+            return *bound;
+          }
+        }
+      }
+    }
+    return std::nullopt;
+  };
+
+  auto getConstIntBound = [&](Value v) {
+    unsigned bitWidth = ConstantIntRanges::getStorageBitwidth(v.getType());
+    APInt min = APInt::getSignedMinValue(bitWidth);
+    APInt max = APInt::getSignedMaxValue(bitWidth);
+    APInt apVal;
+    if (auto cst = getConstantIntValue(getAsOpFoldResult(v))) {
+      apVal = {bitWidth, static_cast<uint64_t>(*cst), /*signed*/ true};
+      return mlir::ConstantIntRanges::constant(apVal);
+    } else if (auto assumedBound = getAssumedBound(v, min, max, bitWidth)) {
+      return *assumedBound;
+    } else {
+      return mlir::ConstantIntRanges::range(min, max, true);
+    }
+  };
+
+  auto lbBound = getConstIntBound(forOp.getLowerBound());
+  auto ubBound = getConstIntBound(forOp.getUpperBound());
+  return mlir::intrange::evaluatePred(mlir::intrange::CmpPredicate::slt,
+                                      lbBound, ubBound)
+      .value_or(false);
+}
+
 void hoistTmemAlloc(ttng::TMEMAllocOp allocToHoist) {
   // extra loop nest
   SmallVector<scf::ForOp> loopNest;
@@ -1171,34 +1269,6 @@ void hoistTmemAlloc(ttng::TMEMAllocOp allocToHoist) {
           return true;
         }
       }
-      return false;
-    };
-
-    auto canProveExecuteOnce = [](scf::ForOp forOp) {
-      // For now, an extremely crude pattern matching that
-      // checks lb = 0 and there is an assume op which asserts ub > 0.
-      // TODO: Prove a general predicate ub - lb > 0 using constancy information
-      // and assumptions from llvm.intr.assume ops.
-      if (!matchPattern(forOp.getLowerBound(), m_Zero())) {
-        return false;
-      }
-      mlir::ForwardSliceOptions opt;
-      SetVector<Operation *> slice;
-      (void)getForwardSlice(forOp.getUpperBound(), &slice, opt);
-
-      for (auto op : slice) {
-        if (auto assumeOp = dyn_cast<LLVM::AssumeOp>(op)) {
-          auto cond = assumeOp.getCond();
-          if (auto cmpi = cond.getDefiningOp<arith::CmpIOp>()) {
-            if (cmpi.getPredicate() == arith::CmpIPredicate::sgt &&
-                cmpi.getLhs() == forOp.getUpperBound() &&
-                matchPattern(cmpi.getRhs(), m_Zero())) {
-              return true;
-            }
-          }
-        }
-      }
-
       return false;
     };
 
