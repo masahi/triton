@@ -1,6 +1,10 @@
+#include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Analysis/TopologicalSortUtils.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dominance.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/WalkResult.h"
@@ -14,6 +18,7 @@
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include <optional>
+#include <utility>
 
 using namespace mlir;
 using namespace triton;
@@ -1036,7 +1041,7 @@ public:
             if (hasPartition(store)) {
               setPartition(newAlloc, getPartitionIds(store));
             }
-	    rewriter.eraseOp(store);
+            rewriter.eraseOp(store);
             rewriter.replaceOp(alloc, newAlloc);
             return success();
           }
@@ -1048,21 +1053,29 @@ public:
   }
 };
 
-bool canRemoveTmemStore(ttng::TMEMAllocOp tmemAlloc) {
+std::optional<std::pair<scf::ForOp, ttng::MMAv5OpInterface>>
+getUniqueUserLoopAndMMA(ttng::TMEMAllocOp tmemAlloc) {
   auto tok = tmemAlloc.getToken();
   if (!tok || !tok.hasOneUse())
-    return false;
+    return std::nullopt;
   auto loop = dyn_cast<scf::ForOp>(*tok.getUsers().begin());
   if (!loop)
-    return false;
+    return std::nullopt;
   auto loopTok = loop.getBody()->getArgument(
       tok.getUses().begin()->getOperandNumber() - 2);
   if (!loopTok.hasOneUse())
+    return std::nullopt;
+  auto mma = dyn_cast<ttng::MMAv5OpInterface>(*loopTok.getUsers().begin());
+  if (mma)
+    return std::make_pair(loop, mma);
+  return std::nullopt;
+}
+
+bool canRemoveTmemStore(ttng::TMEMAllocOp tmemAlloc) {
+  auto opt = getUniqueUserLoopAndMMA(tmemAlloc);
+  if (!opt)
     return false;
-  auto mma =
-      dyn_cast<nvidia_gpu::MMAv5OpInterface>(*loopTok.getUsers().begin());
-  if (!mma)
-    return false;
+  auto [loop, mma] = *opt;
   auto useD = dyn_cast<BlockArgument>(mma.useAccumulator());
   if (!useD)
     return false;
@@ -1108,6 +1121,81 @@ void hoistTmemAlloc(ttng::TMEMAllocOp allocToHoist) {
     return;
   }
   loopNest.push_back(currentForOp);
+
+  {
+    // Check if hoisting across all loop nests is valid. Hoisting is invalid
+    // when the inner loop that does MMA executes variable number of times
+    // depending on the outer loop variables, and some instances of the inner
+    // loops never execute while others do. So we hoist across loop nests only
+    // in the following cases:
+    // 1. The loop iteration counts for all loops do not depend on their outer
+    // loop variables.
+    // 2. If there is a loop whose iteration count depends on outer loop
+    // varaibles, there is an llvm.intr.assume op from which we can prove that
+    // the number of iteration is greater than zero.
+    auto opt = getUniqueUserLoopAndMMA(allocToHoist);
+    if (!opt) {
+      return;
+    }
+    auto mmaLoop = opt->first;
+    SmallVector<scf::ForOp> innerLoopNest{mmaLoop};
+    innerLoopNest.insert(innerLoopNest.begin(), loopNest.begin(),
+                         loopNest.end() - 1);
+
+    // Does the expression x depend on y?
+    auto dependOn = [](Value x, Value y) {
+      mlir::BackwardSliceOptions opt;
+      opt.omitBlockArguments = true;
+      SetVector<Operation *> slice;
+      (void)getBackwardSlice(x, &slice, opt);
+      for (auto user : y.getUsers()) {
+        if (slice.count(user)) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    auto canProveExecuteOnce = [](scf::ForOp forOp) {
+      // For now, an extremely crude pattern matching that
+      // checks lb = 0 and there is an assume op which asserts ub > 0.
+      // TODO: Prove a general predicate ub - lb > 0 using constancy information
+      // and assumptions from llvm.intr.assume ops.
+      if (!matchPattern(forOp.getLowerBound(), m_Zero())) {
+        return false;
+      }
+      mlir::ForwardSliceOptions opt;
+      SetVector<Operation *> slice;
+      (void)getForwardSlice(forOp.getUpperBound(), &slice, opt);
+
+      for (auto op : slice) {
+        if (auto assumeOp = dyn_cast<LLVM::AssumeOp>(op)) {
+          auto cond = assumeOp.getCond();
+          if (auto cmpi = cond.getDefiningOp<arith::CmpIOp>()) {
+            if (cmpi.getPredicate() == arith::CmpIPredicate::sgt &&
+                cmpi.getLhs() == forOp.getUpperBound() &&
+                matchPattern(cmpi.getRhs(), m_Zero())) {
+              return true;
+            }
+          }
+        }
+      }
+
+      return false;
+    };
+
+    for (auto [i, innerFor] : llvm::enumerate(innerLoopNest)) {
+      for (int j = i; j < loopNest.size(); ++j) {
+        auto outerForIter = loopNest[j].getInductionVar();
+        if ((dependOn(innerFor.getLowerBound(), outerForIter) ||
+             dependOn(innerFor.getUpperBound(), outerForIter)) &&
+            !canProveExecuteOnce(innerFor)) {
+          // Cannot hoist this tmem alloc across the outer loop loopNest[j]
+          return;
+        }
+      }
+    }
+  }
 
   // hoist to outside tt.warp_specialized loop
   allocToHoist->moveBefore(currentForOp);
@@ -1215,7 +1303,6 @@ void PartitionScheduling::runOnOperation() {
       SmallVector<ttng::TMEMAllocOp> tmemAllocToHoist;
       loop.walk([&](ttng::TMEMAllocOp tmemAlloc) {
         if (tmemAlloc.getSrc() && canRemoveTmemStore(tmemAlloc)) {
-          // TODO: check if hoisting is safe
           tmemAllocToHoist.push_back(tmemAlloc);
         }
       });
