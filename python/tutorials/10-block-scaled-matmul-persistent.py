@@ -131,91 +131,6 @@ def block_scaled_matmul_kernel_persistent(
             c_desc.store([offs_am, offs_bn], accumulator.to(output_dtype))
 
 
-@triton.jit(launch_metadata=_matmul_launch_metadata)
-def block_scaled_matmul_kernel_persistent_scale_cpasync(
-    a_desc,
-    a_scale,
-    b_desc,
-    b_scale,
-    c_desc,
-    M: tl.constexpr,
-    N: tl.constexpr,
-    K: tl.constexpr,
-    stride_sk: tl.constexpr,
-    stride_sb: tl.constexpr,
-    output_type: tl.constexpr,
-    ELEM_PER_BYTE_A: tl.constexpr,  #
-    ELEM_PER_BYTE_B: tl.constexpr,  #
-    VEC_SIZE: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    NUM_SMS: tl.constexpr,
-    EPILOGUE_SUBTILE: tl.constexpr,
-):
-    if output_type == 0:
-        output_dtype = tl.float32
-    elif output_type == 1:
-        output_dtype = tl.float16
-    elif output_type == 2:
-        output_dtype = tl.float8e4nv
-
-    start_pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(M, BLOCK_M)
-    num_pid_n = tl.cdiv(N, BLOCK_N)
-    k_tiles = tl.cdiv(K, BLOCK_K)
-    num_tiles = num_pid_m * num_pid_n
-    GROUP_SIZE_M: tl.constexpr = 8
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-
-    MIXED_PREC: tl.constexpr = ELEM_PER_BYTE_A == 1 and ELEM_PER_BYTE_B == 2
-
-    for tile_id in tl.range(start_pid, num_tiles, tl.num_programs(0)):
-        pid_m, pid_n = _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS)
-        offs_am = pid_m * BLOCK_M
-        offs_bn = pid_n * BLOCK_N
-        offs_k_a = 0
-        offs_k_b = 0
-        offs_sm = (pid_m * (BLOCK_M // 128) + tl.arange(0, BLOCK_M // 128)) % M
-        offs_sn = (pid_n * (BLOCK_N // 128) + tl.arange(0, BLOCK_N // 128)) % N
-
-        offs_inner = tl.arange(0, (BLOCK_K // VEC_SIZE // 4) * 32 * 4 * 4)
-        a_scale_ptr = a_scale + offs_sm[:, None] * stride_sk + offs_inner[None, :]
-        b_scale_ptr = b_scale + offs_sn[:, None] * stride_sk + offs_inner[None, :]
-
-        accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-        for _ in tl.range(0, k_tiles):
-            a = a_desc.load([offs_am, offs_k_a])
-            b = b_desc.load([offs_bn, offs_k_b])
-            scale_a = tl.load(a_scale_ptr)
-            scale_b = tl.load(b_scale_ptr)
-            scale_a = scale_a.reshape(BLOCK_M // 128, BLOCK_K // VEC_SIZE // 4, 32, 4, 4).trans(0, 3, 2, 1, 4).reshape(BLOCK_M, BLOCK_K // VEC_SIZE)
-            scale_b = scale_b.reshape(BLOCK_N // 128, BLOCK_K // VEC_SIZE // 4, 32, 4, 4).trans(0, 3, 2, 1, 4).reshape(BLOCK_N, BLOCK_K // VEC_SIZE)
-
-            if MIXED_PREC:
-                accumulator = tl.dot_scaled(a, scale_a, "e4m3", b.T, scale_b, "e2m1", accumulator)
-            elif ELEM_PER_BYTE_A == 2 and ELEM_PER_BYTE_B == 2:
-                accumulator = tl.dot_scaled(a, scale_a, "e2m1", b.T, scale_b, "e2m1", accumulator)
-            else:
-                accumulator = tl.dot_scaled(a, scale_a, "e4m3", b.T, scale_b, "e4m3", accumulator)
-
-            offs_k_a += BLOCK_K // ELEM_PER_BYTE_A
-            offs_k_b += BLOCK_K // ELEM_PER_BYTE_B
-            a_scale_ptr += (BLOCK_K // VEC_SIZE // 4) * stride_sb
-            b_scale_ptr += (BLOCK_K // VEC_SIZE // 4) * stride_sb
-
-        if EPILOGUE_SUBTILE:
-            acc = tl.reshape(accumulator, (BLOCK_M, 2, BLOCK_N // 2))
-            acc = tl.permute(acc, (0, 2, 1))
-            acc0, acc1 = tl.split(acc)
-            c0 = acc0.to(output_dtype)
-            c_desc.store([offs_am, offs_bn], c0)
-            c1 = acc1.to(output_dtype)
-            c_desc.store([offs_am, offs_bn + BLOCK_N // 2], c1)
-        else:
-            c_desc.store([offs_am, offs_bn], accumulator.to(output_dtype))
-
-
 def block_scaled_matmul(
     a_desc, a_scale, b_desc, b_scale, dtype_dst, M, N, K, rep_m, rep_n, rep_k, configs, scale_cpasync=False, ws=False
 ):
@@ -249,53 +164,29 @@ def block_scaled_matmul(
         ),
     )
 
-    if scale_cpasync:
-        out = block_scaled_matmul_kernel_persistent_scale_cpasync[grid](
-            a_desc,
-            a_scale,
-            b_desc,
-            b_scale,
-            c_desc,
-            M,
-            N,
-            K,
-            a_scale.stride(0),
-            a_scale.stride(1),
-            dtype_dst,
-            configs["ELEM_PER_BYTE_A"],
-            configs["ELEM_PER_BYTE_B"],
-            configs["VEC_SIZE"],
-            configs["BLOCK_SIZE_M"],
-            configs["BLOCK_SIZE_N"],
-            configs["BLOCK_SIZE_K"],
-            NUM_SMS,
-            EPILOGUE_SUBTILE=epilog_subtile,
-            num_stages=num_stages,
-        )
-    else:
-        out = block_scaled_matmul_kernel_persistent[grid](
-            a_desc,
-            a_scale,
-            b_desc,
-            b_scale,
-            c_desc,
-            M,
-            N,
-            K,
-            dtype_dst,
-            configs["ELEM_PER_BYTE_A"],
-            configs["ELEM_PER_BYTE_B"],
-            configs["VEC_SIZE"],
-            configs["BLOCK_SIZE_M"],
-            configs["BLOCK_SIZE_N"],
-            configs["BLOCK_SIZE_K"],
-            rep_m,
-            rep_n,
-            rep_k,
-            NUM_SMS,
-            EPILOGUE_SUBTILE=epilog_subtile,
-            num_stages=num_stages,
-        )
+    out = block_scaled_matmul_kernel_persistent[grid](
+        a_desc,
+        a_scale,
+        b_desc,
+        b_scale,
+        c_desc,
+        M,
+        N,
+        K,
+        dtype_dst,
+        configs["ELEM_PER_BYTE_A"],
+        configs["ELEM_PER_BYTE_B"],
+        configs["VEC_SIZE"],
+        configs["BLOCK_SIZE_M"],
+        configs["BLOCK_SIZE_N"],
+        configs["BLOCK_SIZE_K"],
+        rep_m,
+        rep_n,
+        rep_k,
+        NUM_SMS,
+        EPILOGUE_SUBTILE=epilog_subtile,
+        num_stages=num_stages,
+    )
 
 #    print(out.asm["ttgir"])
     return output
@@ -377,19 +268,6 @@ def initialize_block_scaled(M, N, K, scale_cpasync, block_scale_type="nvfp4"):
         "VEC_SIZE": VEC_SIZE,
         "num_stages": 3,
     }
-
-    if scale_cpasync:
-        return (
-            a_desc,
-            a_scale.reshape(*a_scale.shape[:-2], 32, 4, 4),
-            b_desc,
-            b_scale.reshape(*b_scale.shape[:-2], 32, 4, 4),
-            ref_output,
-            rep_m,
-            rep_n,
-            rep_k,
-            configs,
-        )
 
     return a_desc, a_scale_desc, b_desc, b_scale_desc, ref_output, rep_m, rep_n, rep_k, configs
 
@@ -488,7 +366,6 @@ if __name__ == "__main__":
     parser.add_argument("--K_step", type=int, default=512)
     parser.add_argument("--bench", action="store_true")
     parser.add_argument("--fp8_output", action="store_true")
-    parser.add_argument("--scale_cpasync", action="store_true")
     parser.add_argument("--format", type=str, choices=["mxfp4", "nvfp4", "mxfp8", "mixed"], default="nvfp4")
     args = parser.parse_args()
 
@@ -507,7 +384,7 @@ if __name__ == "__main__":
             8192,
             512,
             block_scale_type=args.format,
-            scale_cpasync=args.scale_cpasync,
+            scale_cpasync=False,
             output_dtype=output_dtype,
             ws=args.ws,
         )
@@ -526,7 +403,7 @@ if __name__ == "__main__":
                     reps=10000,
                     block_scale_type=args.format,
                     output_dtype=output_dtype,
-                    scale_cpasync=args.scale_cpasync,
+                    scale_cpasync=False,
                     ws=args.ws,
                 )
             proton.finalize()
