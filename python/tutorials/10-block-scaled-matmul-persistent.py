@@ -389,10 +389,7 @@ if __name__ == "__main__":
         )
 
         if args.bench:
-            if args.ws:
-                file_name = f"block_scaled_matmul_ws_{args.format}"
-            else:
-                file_name = f"block_scaled_matmul_swp_{args.format}"
+            file_name = f"block_scaled_matmul_ws_{args.format}"
 
             proton.start(file_name, hook="triton")
             proton.deactivate()
