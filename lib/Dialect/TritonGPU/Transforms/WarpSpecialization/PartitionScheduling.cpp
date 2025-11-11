@@ -1173,7 +1173,8 @@ bool canProveExecuteOnce(scf::ForOp forOp) {
     (void)getForwardSlice(v, &slice, opt);
 
     // For simplicity, we only handle an assume op directly operating on v. It's
-    // possible to support more general cases, but they require a range analysis.
+    // possible to support more general cases, but they require a range
+    // analysis.
     for (auto op : slice) {
       if (auto assumeOp = dyn_cast<LLVM::AssumeOp>(op)) {
         auto cond = assumeOp.getCond();
@@ -1211,7 +1212,7 @@ bool canProveExecuteOnce(scf::ForOp forOp) {
       .value_or(false);
 }
 
-void hoistTmemAlloc(ttng::TMEMAllocOp allocToHoist) {
+bool hoistTmemAlloc(ttng::TMEMAllocOp allocToHoist) {
   // extra loop nest
   SmallVector<scf::ForOp> loopNest;
   auto currentForOp = allocToHoist->getParentOfType<scf::ForOp>();
@@ -1221,7 +1222,7 @@ void hoistTmemAlloc(ttng::TMEMAllocOp allocToHoist) {
   }
 
   if (!currentForOp) {
-    return;
+    return false;
   }
   loopNest.push_back(currentForOp);
 
@@ -1238,7 +1239,7 @@ void hoistTmemAlloc(ttng::TMEMAllocOp allocToHoist) {
     // the number of iteration is greater than zero.
     auto opt = getUniqueUserLoopAndMMA(allocToHoist);
     if (!opt) {
-      return;
+      return false;
     }
     auto mmaLoop = opt->first;
     SmallVector<scf::ForOp> innerLoopNest{mmaLoop};
@@ -1252,7 +1253,7 @@ void hoistTmemAlloc(ttng::TMEMAllocOp allocToHoist) {
       SetVector<Operation *> slice;
       (void)getBackwardSlice(x, &slice, opt);
       for (auto user : y.getUsers()) {
-        if (slice.count(user)) {
+        if (x.getDefiningOp() == user || slice.count(user)) {
           return true;
         }
       }
@@ -1266,7 +1267,7 @@ void hoistTmemAlloc(ttng::TMEMAllocOp allocToHoist) {
              dependOn(innerFor.getUpperBound(), outerForIter)) &&
             !canProveExecuteOnce(innerFor)) {
           // Cannot hoist this tmem alloc across the outer loop loopNest[j]
-          return;
+          return false;
         }
       }
     }
@@ -1330,6 +1331,8 @@ void hoistTmemAlloc(ttng::TMEMAllocOp allocToHoist) {
     setPartition(forOp.getBody()->getTerminator(), getPartitionIds(forOp));
     token = forOp->getResults().back();
   }
+
+  return true;
 }
 
 void PartitionScheduling::runOnOperation() {
@@ -1381,7 +1384,14 @@ void PartitionScheduling::runOnOperation() {
       });
 
       for (auto alloc : tmemAllocToHoist) {
-        hoistTmemAlloc(alloc);
+        if (!hoistTmemAlloc(alloc)) {
+          SetVector<int> mmaPartition;
+          mmaPartition.insert(1);
+          // tmem store remaining in the outer loop must belong to the MMA
+          // partition. This is necessary for correctly double buffering this
+          // accumulator.
+          setPartition(alloc, mmaPartition);
+        }
       }
     }
   });
