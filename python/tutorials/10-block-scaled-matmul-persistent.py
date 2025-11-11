@@ -18,10 +18,8 @@ def supports_block_scaling():
 
 def _matmul_launch_metadata(grid, kernel, args):
     ret = {}
-    M, N, K, WS = args["M"], args["N"], args["K"], args.get("WARP_SPECIALIZE", False)
-    ws_str = "_ws" if WS else ""
-    kernel_name = kernel.name + ws_str
-
+    M, N, K = args["M"], args["N"], args["K"]
+    kernel_name = kernel.name
     if "ELEM_PER_BYTE_A" and "ELEM_PER_BYTE_B" and "VEC_SIZE" in args:
         if args["ELEM_PER_BYTE_A"] == 1 and args["ELEM_PER_BYTE_B"] == 1:
             kernel_name += "_mxfp8"
@@ -48,28 +46,28 @@ def _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS):
 
 
 @triton.jit(launch_metadata=_matmul_launch_metadata)
-def block_scaled_matmul_kernel_persistent(
-    a_desc,
-    a_scale_desc,
-    b_desc,
-    b_scale_desc,
-    c_desc,
-    M: tl.constexpr,
-    N: tl.constexpr,
-    K: tl.constexpr,
-    output_type: tl.constexpr,
-    ELEM_PER_BYTE_A: tl.constexpr,  #
-    ELEM_PER_BYTE_B: tl.constexpr,  #
-    VEC_SIZE: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    rep_m: tl.constexpr,
-    rep_n: tl.constexpr,
-    rep_k: tl.constexpr,
-    NUM_SMS: tl.constexpr,
-    EPILOGUE_SUBTILE: tl.constexpr,
-):
+def block_scaled_matmul_kernel(  #
+        a_desc,  #
+        a_scale_desc,  #
+        b_desc,  #
+        b_scale_desc,  #
+        c_desc,  #
+        M: tl.constexpr,  #
+        N: tl.constexpr,  #
+        K: tl.constexpr,  #
+        output_type: tl.constexpr,  #
+        ELEM_PER_BYTE_A: tl.constexpr,  #
+        ELEM_PER_BYTE_B: tl.constexpr,  #
+        VEC_SIZE: tl.constexpr,  #
+        BLOCK_M: tl.constexpr,  #
+        BLOCK_N: tl.constexpr,  #
+        BLOCK_K: tl.constexpr,  #
+        rep_m: tl.constexpr,  #
+        rep_n: tl.constexpr,  #
+        rep_k: tl.constexpr,  #
+        NUM_SMS: tl.constexpr,
+        NUM_STAGES: tl.constexpr,  #
+):  #
     if output_type == 0:
         output_dtype = tl.float32
     elif output_type == 1:
@@ -87,23 +85,22 @@ def block_scaled_matmul_kernel_persistent(
 
     MIXED_PREC: tl.constexpr = ELEM_PER_BYTE_A == 1 and ELEM_PER_BYTE_B == 2
 
-    for tile_id in tl.range(start_pid, num_tiles, tl.num_programs(0), warp_specialize=True, disallow_acc_multi_buffer=True, flatten=False):
+    for tile_id in tl.range(start_pid, num_tiles, tl.num_programs(0), warp_specialize=True, disallow_acc_multi_buffer=True, flatten=False, num_stages=NUM_STAGES):
         pid_m, pid_n = _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS)
         offs_am = pid_m * BLOCK_M
         offs_bn = pid_n * BLOCK_N
         offs_k_a = 0
         offs_k_b = 0
-
         offs_scale_m = pid_m * rep_m
         offs_scale_n = pid_n * rep_n
         offs_scale_k = 0
 
         accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-        for _ in tl.range(0, k_tiles):
+        for k in tl.range(0, tl.cdiv(K, BLOCK_K)):
             a = a_desc.load([offs_am, offs_k_a])
             b = b_desc.load([offs_bn, offs_k_b])
-            scale_a = a_scale_desc.load([offs_scale_m, offs_scale_k, 0, 0])
-            scale_b = b_scale_desc.load([offs_scale_n, offs_scale_k, 0, 0])
+            scale_a = a_scale_desc.load([0, offs_scale_m, offs_scale_k, 0, 0])
+            scale_b = b_scale_desc.load([0, offs_scale_n, offs_scale_k, 0, 0])
 
             scale_a = scale_a.reshape(rep_m, rep_k, 32, 4, 4).trans(0, 3, 2, 1, 4).reshape(BLOCK_M, BLOCK_K // VEC_SIZE)
             scale_b = scale_b.reshape(rep_n, rep_k, 32, 4, 4).trans(0, 3, 2, 1, 4).reshape(BLOCK_N, BLOCK_K // VEC_SIZE)
@@ -119,32 +116,11 @@ def block_scaled_matmul_kernel_persistent(
             offs_k_b += BLOCK_K // ELEM_PER_BYTE_B
             offs_scale_k += rep_k
 
-        if EPILOGUE_SUBTILE:
-            acc = tl.reshape(accumulator, (BLOCK_M, 2, BLOCK_N // 2))
-            acc = tl.permute(acc, (0, 2, 1))
-            acc0, acc1 = tl.split(acc)
-            c0 = acc0.to(output_dtype)
-            c_desc.store([offs_am, offs_bn], c0)
-            c1 = acc1.to(output_dtype)
-            c_desc.store([offs_am, offs_bn + BLOCK_N // 2], c1)
-        else:
-            c_desc.store([offs_am, offs_bn], accumulator.to(output_dtype))
+        c_desc.store([offs_am, offs_bn], accumulator.to(output_dtype))
 
 
-def block_scaled_matmul(
-    a_desc, a_scale, b_desc, b_scale, dtype_dst, M, N, K, rep_m, rep_n, rep_k, configs, scale_cpasync=False, ws=False
-):
+def block_scaled_matmul(a_desc, a_scale_desc, b_desc, b_scale_desc, dtype_dst, M, N, K, rep_m, rep_n, rep_k, configs):
     output = torch.empty((M, N), dtype=dtype_dst, device="cuda")
-
-    if dtype_dst == torch.float8_e4m3fn:
-        num_stages = 4
-        epilog_subtile = True
-        store_block_n = configs["BLOCK_SIZE_N"] // 2
-    else:
-        num_stages = configs["num_stages"]
-        epilog_subtile = False
-        store_block_n = configs["BLOCK_SIZE_N"]
-
     if dtype_dst == torch.float32:
         dtype_dst = 0
     elif dtype_dst == torch.float16:
@@ -154,7 +130,9 @@ def block_scaled_matmul(
     else:
         raise ValueError(f"Unsupported dtype: {dtype_dst}")
 
-    c_desc = TensorDescriptor.from_tensor(output, ([configs["BLOCK_SIZE_M"], store_block_n]))
+    BLOCK_M = configs["BLOCK_SIZE_M"]
+    BLOCK_N = configs["BLOCK_SIZE_N"]
+    c_desc = TensorDescriptor.from_tensor(output, [BLOCK_M, BLOCK_N])
 
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
     grid = (
@@ -164,11 +142,11 @@ def block_scaled_matmul(
         ),
     )
 
-    out = block_scaled_matmul_kernel_persistent[grid](
+    out = block_scaled_matmul_kernel[grid](
         a_desc,
-        a_scale,
+        a_scale_desc,
         b_desc,
-        b_scale,
+        b_scale_desc,
         c_desc,
         M,
         N,
@@ -184,27 +162,35 @@ def block_scaled_matmul(
         rep_n,
         rep_k,
         NUM_SMS,
-        EPILOGUE_SUBTILE=epilog_subtile,
-        num_stages=num_stages,
+        configs["num_stages"],
     )
 
-#    print(out.asm["ttgir"])
+    # print(out.asm["ttgir"])
     return output
 
 
-def initialize_block_scaled(M, N, K, scale_cpasync, block_scale_type="nvfp4"):
+def initialize_block_scaled(M, N, K, block_scale_type="nvfp4", compute_reference=False):
     BLOCK_M = 128
     BLOCK_N = 256
     BLOCK_K = 256 if "fp4" in block_scale_type else 128
     VEC_SIZE = 16 if block_scale_type == "nvfp4" else 32
+    assert block_scale_type in ["nvfp4", "mxfp4", "mxfp8", "mixed"], f"Invalid block scale type: {block_scale_type}"
     ELEM_PER_BYTE_A = 2 if "fp4" in block_scale_type else 1
     ELEM_PER_BYTE_B = 1 if block_scale_type == "mxfp8" else 2
 
     device = "cuda"
-
     a_ref = MXFP4Tensor(size=(M, K), device=device).random()
+    # Similar to Hopper's wgmma symmetric fp8 instruction, the RHS is expected
+    # to be in col-major layout for Blackwell's tcgen05.mma when using fp4 operands.
+    # To conform to the expected semantics of tl.dot_scaled, (M, K) x (K, N),
+    # the data is generated in col-major layout, packed along K for fp4, and then
+    # logically transposed. Note that if one operand is of fp8 precision, unlike Hopper,
+    # Blackwell supports both row-major and col-major layouts for the RHS matrix.
+    # For the mixed-precision case, the fp4 RHS can be either in row or col-major layout.
+    # But for performance reason, it is recommended to use col-major layout. If TMA is used
+    # for the fp4 RHS operand load in mixed-precision dot, as in this tutorial, it must be
+    # in col-major layout.
     b_ref = MXFP4Tensor(size=(N, K), device=device).random()
-
     if block_scale_type in ["mxfp8", "mixed"]:
         a_ref = a_ref.to(torch.float32)
         a = a_ref.to(torch.float8_e4m3fn)
@@ -220,9 +206,11 @@ def initialize_block_scaled(M, N, K, scale_cpasync, block_scale_type="nvfp4"):
 
     b_ref = b_ref.to(torch.float32).T
 
+    a_desc = TensorDescriptor.from_tensor(a, [BLOCK_M, BLOCK_K // ELEM_PER_BYTE_A])
+    b_desc = TensorDescriptor.from_tensor(b, [BLOCK_N, BLOCK_K // ELEM_PER_BYTE_B])
+
     a_scale_shape = [M // 128, K // VEC_SIZE // 4, 32, 16]
     b_scale_shape = [N // 128, K // VEC_SIZE // 4, 32, 16]
-
     epsilon = 1e-8
     a_scale = torch.rand(a_scale_shape, device=device) + epsilon
     b_scale = torch.rand(b_scale_shape, device=device) + epsilon
@@ -241,110 +229,63 @@ def initialize_block_scaled(M, N, K, scale_cpasync, block_scale_type="nvfp4"):
     rep_n = BLOCK_N // 128
     rep_k = BLOCK_K // VEC_SIZE // 4
 
-    a_desc = TensorDescriptor.from_tensor(a, [BLOCK_M, BLOCK_K // ELEM_PER_BYTE_A])
-    b_desc = TensorDescriptor.from_tensor(b, [BLOCK_N, BLOCK_K // ELEM_PER_BYTE_B])
+    # Use 5D TMA descriptor [1, rep_m, rep_k, 2, 256] with uint8 elements.
+    # With 256 elements we better utilize the L2 and don't require the TMA
+    # engine to emit many small messages (16B) messages as with 32x16xu8.
+    a_scale_block_shape = [1, rep_m, rep_k, 2, 256]
+    b_scale_block_shape = [1, rep_n, rep_k, 2, 256]
+    a_scale = a_scale.reshape(1, a_scale_shape[0], a_scale.shape[1], 2, 256)
+    b_scale = b_scale.reshape(1, b_scale_shape[0], b_scale.shape[1], 2, 256)
+    a_scale_desc = TensorDescriptor.from_tensor(a_scale, block_shape=a_scale_block_shape)
+    b_scale_desc = TensorDescriptor.from_tensor(b_scale, block_shape=b_scale_block_shape)
 
-    a_scale_desc = TensorDescriptor.from_tensor(a_scale, [rep_m, rep_k] + list(a_scale_shape)[-2:])
-    b_scale_desc = TensorDescriptor.from_tensor(b_scale, [rep_n, rep_k] + list(b_scale_shape)[-2:])
+    reference = None
+    if compute_reference:
+        a_scale_ref = a_scale_ref.to(torch.float32)
+        b_scale_ref = b_scale_ref.to(torch.float32)
 
-    a_scale_ref = a_scale_ref.to(torch.float32)
-    b_scale_ref = b_scale_ref.to(torch.float32)
+        def unpack_scale(packed):
+            packed = packed.reshape(*packed.shape[:-2], 32, 4, 4)
+            num_chunk_m, num_chunk_k, _, _, _ = packed.shape
+            return packed.permute(0, 3, 2, 1, 4).reshape(num_chunk_m * 128, num_chunk_k * 4).contiguous()
 
-    def unpack_scale(packed):
-        packed = packed.reshape(*packed.shape[:-2], 32, 4, 4)
-        num_chunk_m, num_chunk_k, _, _, _ = packed.shape
-        return packed.permute(0, 3, 2, 1, 4).reshape(num_chunk_m * 128, num_chunk_k * 4).contiguous()
-
-    a_scale_ref = unpack_scale(a_scale_ref).repeat_interleave(VEC_SIZE, dim=1)[:M, :K]
-    b_scale_ref = unpack_scale(b_scale_ref).repeat_interleave(VEC_SIZE, dim=1).T.contiguous()[:K, :N]
-    ref_output = torch.matmul(a_ref.to(torch.float32) * a_scale_ref, b_ref * b_scale_ref)
+        a_scale_ref = unpack_scale(a_scale_ref).repeat_interleave(VEC_SIZE, dim=1)[:M, :K]
+        b_scale_ref = unpack_scale(b_scale_ref).repeat_interleave(VEC_SIZE, dim=1).T.contiguous()[:K, :N]
+        reference = torch.matmul(a_ref.to(torch.float32) * a_scale_ref, b_ref * b_scale_ref)
 
     configs = {
         "BLOCK_SIZE_M": BLOCK_M,
         "BLOCK_SIZE_N": BLOCK_N,
         "BLOCK_SIZE_K": BLOCK_K,
+        "num_stages": 3,
         "ELEM_PER_BYTE_A": ELEM_PER_BYTE_A,
         "ELEM_PER_BYTE_B": ELEM_PER_BYTE_B,
         "VEC_SIZE": VEC_SIZE,
-        "num_stages": 3,
     }
-
-    return a_desc, a_scale_desc, b_desc, b_scale_desc, ref_output, rep_m, rep_n, rep_k, configs
-
-
-def validate_block_scaled(M, N, K, block_scale_type="nvfp4", scale_cpasync=False, output_dtype=torch.float16, ws=False):
-    a_desc, a_scale, b_desc_desc, b_scale, reference, rep_m, rep_n, rep_k, configs = initialize_block_scaled(
-        M, N, K, scale_cpasync, block_scale_type
-    )
-    output = block_scaled_matmul(
-        a_desc,
-        a_scale,
-        b_desc_desc,
-        b_scale,
-        output_dtype,
-        M,
-        N,
-        K,
-        rep_m,
-        rep_n,
-        rep_k,
-        configs,
-        scale_cpasync,
-        ws=ws,
-    )
-
-    if output_dtype == torch.float16:
-        torch.testing.assert_close(reference, output.to(torch.float32), atol=1e-3, rtol=1e-3)
-        print(f"✅ (pass {block_scale_type})")
-    else:
-        print(reference)
-        print(output.to(torch.float32))
+    return a_desc, a_scale_desc, b_desc, b_scale_desc, rep_m, rep_n, rep_k, configs, reference
 
 
-def bench_block_scaled(K, block_scale_type="nvfp4", output_dtype=torch.float16, scale_cpasync=False, reps=10, ws=False):
+def validate_block_scaled(M, N, K, block_scale_type="nvfp4"):
+    a_desc, a_scale, b_desc, b_scale, rep_m, rep_n, rep_k, configs, reference = initialize_block_scaled(
+        M, N, K, block_scale_type, compute_reference=True)
+    output = block_scaled_matmul(a_desc, a_scale, b_desc, b_scale, torch.float16, M, N, K, rep_m, rep_n, rep_k, configs)
+    torch.testing.assert_close(reference, output.to(torch.float32), atol=1e-3, rtol=1e-3)
+    print(f"✅ (pass {block_scale_type})")
+
+
+def bench_block_scaled(K, block_scale_type="nvfp4", reps=10):
     assert K % 128 == 0
     M = 8192
     N = 8192
     print(f"Problem Shape = {M}x{N}x{K}")
 
-    a_desc, a_scale, b_desc_desc, b_scale, _, rep_m, rep_n, rep_k, configs = initialize_block_scaled(
-        M, N, K, scale_cpasync, block_scale_type
-    )
-    _ = block_scaled_matmul(
-        a_desc,
-        a_scale,
-        b_desc_desc,
-        b_scale,
-        output_dtype,
-        M,
-        N,
-        K,
-        rep_m,
-        rep_n,
-        rep_k,
-        configs,
-        scale_cpasync,
-        ws=ws,
-    )
+    a_desc, a_scale, b_desc, b_scale, rep_m, rep_n, rep_k, configs, _ = initialize_block_scaled(
+        M, N, K, block_scale_type, compute_reference=False)
+    _ = block_scaled_matmul(a_desc, a_scale, b_desc, b_scale, torch.float16, M, N, K, rep_m, rep_n, rep_k, configs)
 
     proton.activate(0)
     for _ in range(reps):
-        _ = block_scaled_matmul(
-            a_desc,
-            a_scale,
-            b_desc_desc,
-            b_scale,
-            output_dtype,
-            M,
-            N,
-            K,
-            rep_m,
-            rep_n,
-            rep_k,
-            configs,
-            scale_cpasync,
-            ws=ws,
-        )
+        _ = block_scaled_matmul(a_desc, a_scale, b_desc, b_scale, torch.float16, M, N, K, rep_m, rep_n, rep_k, configs)
     proton.deactivate(0)
     print("Done benchmarking")
 
@@ -361,46 +302,28 @@ def show_profile(profile_name):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("-K", type=int, required=False, default=512)
     parser.add_argument("--K_range", type=int, nargs=2)
     parser.add_argument("--K_step", type=int, default=512)
-    parser.add_argument("--bench", action="store_true")
-    parser.add_argument("--fp8_output", action="store_true")
+    parser.add_argument("--bench", action="store_true", default=False)
     parser.add_argument("--format", type=str, choices=["mxfp4", "nvfp4", "mxfp8", "mixed"], default="nvfp4")
     args = parser.parse_args()
 
     if not supports_block_scaling():
         print("⛔ This example requires GPU support for block scaled matmul")
     else:
+        if args.K and args.K_range is None:
+            args.K_range = [args.K, args.K]
+            args.K_step = 1  # doesn't matter as long as it's not 0
+
         torch.manual_seed(42)
 
-        if args.fp8_output and args.format != "nvfp4":
-            output_dtype = torch.float8_e4m3fn
-        else:
-            output_dtype = torch.float16
-
-        validate_block_scaled(
-            8192,
-            8192,
-            512,
-            block_scale_type=args.format,
-            scale_cpasync=False,
-            output_dtype=output_dtype,
-            ws=True,
-        )
+        validate_block_scaled(8192, 8192, 8192, block_scale_type=args.format)
 
         if args.bench:
-            file_name = f"block_scaled_matmul_ws_{args.format}"
-
-            proton.start(file_name, hook="triton")
-            proton.deactivate()
+            proton.start("block_scaled_matmul", hook="triton")
+            proton.deactivate(0)  # Skip argument creation
             for K in range(args.K_range[0], args.K_range[1] + 1, args.K_step):
-                bench_block_scaled(
-                    K,
-                    reps=10000,
-                    block_scale_type=args.format,
-                    output_dtype=output_dtype,
-                    scale_cpasync=False,
-                    ws=True,
-                )
+                bench_block_scaled(K, reps=10000, block_scale_type=args.format)
             proton.finalize()
-            show_profile(file_name)
+            show_profile("block_scaled_matmul")
