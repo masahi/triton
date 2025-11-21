@@ -602,13 +602,6 @@ public:
       for (auto op : memoryOps) {
         if (isa<triton::DescriptorOpInterface, LoadOp>(op) &&
             *getStage(op) != loadMaxStage) {
-          // Skip creating an aref for loads at earlier pipeline stages than
-          // the maximum ones. Creating aref for loads means they are lowered
-          // to their async counterparts and multi-buffered. Loads at earlier
-          // pipeline stages are likely to be in a non-load partition, or used
-          // as an input to a dependent load in a load partition. It is
-          // possible to pipeline them, but for simplicity we do not that for
-          // now.
           continue;
         }
         auto producedValues = getProducedValues(op, loop.getBody());
@@ -623,6 +616,19 @@ public:
         if (op == loop || isa<MMAv5OpInterface, TMEMAllocOp, TMEMStoreOp>(op)) {
           return WalkResult::advance();
         }
+        if (isa<triton::DescriptorOpInterface, LoadOp>(op) &&
+            (!op->hasAttr(kLoopStageAttrName) ||
+             *getStage(op) != loadMaxStage)) {
+          // Skip creating an aref for loads at earlier pipeline stages than
+          // the maximum ones. Creating aref for loads means they are lowered
+          // to their async counterparts and multi-buffered. Loads at earlier
+          // pipeline stages are likely to be in a non-load partition, or used
+          // as an input to a dependent load in a load partition. It is
+          // possible to pipeline them, but for simplicity we do not that for
+          // now.
+          return WalkResult::advance();
+        }
+
         auto producedValues = getProducedValues(op, loop.getBody());
         for (auto producedValue : producedValues) {
           OpBuilder builder(op);
