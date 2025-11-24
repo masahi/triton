@@ -239,10 +239,13 @@ static std::optional<PartitionSet> getInitialPartitions(scf::ForOp loop) {
     // buffer scales in TMEM. We create a dedicated partition responsible for
     // storing scales into double-buffered TMEM.
     if (auto tmemAlloc = scale.getDefiningOp<ttng::TMEMAllocOp>()) {
-      if (!scaleTmemCopyPartition) {
-        scaleTmemCopyPartition = partitions.addPartition(0);
+      if (auto localLoad = tmemAlloc.getSrc().getDefiningOp<LocalLoadOp>()) {
+        if (!scaleTmemCopyPartition) {
+          scaleTmemCopyPartition = partitions.addPartition(0);
+        }
+        setPartition(tmemAlloc, scaleTmemCopyPartition);
+        setPartition(localLoad, scaleTmemCopyPartition);
       }
-      setPartition(tmemAlloc, scaleTmemCopyPartition);
     }
   };
 

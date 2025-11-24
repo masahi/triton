@@ -523,7 +523,7 @@ void insertArriveBarrier(Location loc, ArrayRef<AsyncOp> asyncOps,
       auto cpasyncArrive =
           rewriter.create<nvidia_gpu::AsyncCopyMbarrierArriveOp>(
               loc, mbar, /*noIncrement*/ false);
-      assignStageCluster(cpasyncArrive, partitionIds, stageCluster, rewriter);
+      assignStageCluster(cpasyncArrive, partitionWsTagIds, stageCluster, rewriter);
       arriveOp = rewriter.create<nvidia_gpu::ArriveBarrierOp>(loc, mbar, 1);
       break;
     }
