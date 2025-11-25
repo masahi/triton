@@ -583,13 +583,15 @@ public:
       };
       int loadMaxStage = -1;
       loop.walk([&](Operation *op) {
-        if (isa<triton::DescriptorOpInterface, LoadOp>(op)) {
-          auto stage = getStage(op);
-          assert(stage);
-          loadMaxStage = std::max<int>(loadMaxStage, *stage);
+        if (op->getNumResults() > 0 &&
+            isa<triton::DescriptorOpInterface, LoadOp>(op)) {
+          if (auto stage = getStage(op)) {
+            loadMaxStage = std::max<int>(loadMaxStage, *stage);
+          }
         }
       });
-      assert(loadMaxStage != -1 && "No load op is found.");
+      assert(loadMaxStage != -1 &&
+             "No load op with stage annotation is found.");
 
       // To handle cases where desc_load result in registers is used as is in
       // addition to being consumed by local_alloc op, we process
@@ -606,17 +608,6 @@ public:
       });
 
       for (auto op : memoryOps) {
-        if (isa<triton::DescriptorOpInterface, LoadOp>(op) &&
-            *getStage(op) != loadMaxStage) {
-          // Skip creating an aref for loads at earlier pipeline stages than
-          // the maximum ones. Creating aref for loads means they are lowered
-          // to their async counterparts and multi-buffered. Loads at earlier
-          // pipeline stages are likely to be in a non-load partition, or used
-          // as an input to a dependent load in a load partition. It is
-          // possible to pipeline them, but for simplicity we do not that for
-          // now.
-          continue;
-        }
         auto producedValues = getProducedValues(op, loop.getBody());
         for (auto producedValue : producedValues) {
           OpBuilder builder(op);
@@ -632,6 +623,13 @@ public:
         if (isa<triton::DescriptorOpInterface, LoadOp>(op) &&
             (!op->hasAttr(kLoopStageAttrName) ||
              *getStage(op) != loadMaxStage)) {
+          // Skip creating an aref for loads at earlier pipeline stages than
+          // the maximum ones. Creating aref for loads means they are lowered
+          // to their async counterparts and multi-buffered. Loads at earlier
+          // pipeline stages are likely to be in a non-load partition, or used
+          // as an input to a dependent load in a load partition. It is
+          // possible to pipeline them, but for simplicity we do not that for
+          // now.
           return WalkResult::advance();
         }
 
