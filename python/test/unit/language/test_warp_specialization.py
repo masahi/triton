@@ -1,3 +1,4 @@
+import re
 import torch
 import pytest
 import pathlib
@@ -812,6 +813,6 @@ def test_cpasync_indirect_matmul(BLOCK_M, BLOCK_N, BLOCK_K, device):
     torch.testing.assert_close(expect, Out, atol=0.03, rtol=0.03)
 
 # test_mixed_tma_cpasync(1024, 1024, 1024, 128, 128, 128, 8, True, "cuda")
-test_cpasync_indirect_matmul(128, 128, 64, "cuda")
+# test_cpasync_indirect_matmul(128, 128, 64, "cuda")
 # test_warp_specialize_tma_matmul(1024, 1024, 1024, 128, 128, 64, 3, 4, False)
 # test_warp_specialize_attention_forward(1024, 1024, 128, 128, 3, False, 4, True)

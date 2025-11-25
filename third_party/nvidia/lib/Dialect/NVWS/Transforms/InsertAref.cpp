@@ -581,27 +581,40 @@ public:
         }
         return std::nullopt;
       };
+      int loadMaxStage = -1;
+      loop.walk([&](Operation *op) {
+        if (isa<triton::DescriptorOpInterface, LoadOp>(op)) {
+          auto stage = getStage(op);
+          assert(stage);
+          loadMaxStage = std::max<int>(loadMaxStage, *stage);
+        }
+      });
+      assert(loadMaxStage != -1 && "No load op is found.");
+
       // To handle cases where desc_load result in registers is used as is in
       // addition to being consumed by local_alloc op, we process
       // local_alloc(desc_load()) first, followed by remaining register uses of
       // desc_load results.
       SmallVector<Operation *> memoryOps;
-      int loadMaxStage = -1;
       loop.walk([&](Operation *op) {
         if (op->getNumResults() > 0 &&
             (isDescLoadAndAlloc<LocalAllocOp>(op->getResult(0)) ||
              isGlobalLoadAndAlloc<LocalAllocOp>(op->getResult(0)) ||
              isa<LocalAllocOp>(op))) {
           memoryOps.push_back(op);
-          auto stage = getStage(op);
-          assert(stage);
-          loadMaxStage = std::max<int>(loadMaxStage, *stage);
         }
       });
 
       for (auto op : memoryOps) {
         if (isa<triton::DescriptorOpInterface, LoadOp>(op) &&
             *getStage(op) != loadMaxStage) {
+          // Skip creating an aref for loads at earlier pipeline stages than
+          // the maximum ones. Creating aref for loads means they are lowered
+          // to their async counterparts and multi-buffered. Loads at earlier
+          // pipeline stages are likely to be in a non-load partition, or used
+          // as an input to a dependent load in a load partition. It is
+          // possible to pipeline them, but for simplicity we do not that for
+          // now.
           continue;
         }
         auto producedValues = getProducedValues(op, loop.getBody());
@@ -619,13 +632,6 @@ public:
         if (isa<triton::DescriptorOpInterface, LoadOp>(op) &&
             (!op->hasAttr(kLoopStageAttrName) ||
              *getStage(op) != loadMaxStage)) {
-          // Skip creating an aref for loads at earlier pipeline stages than
-          // the maximum ones. Creating aref for loads means they are lowered
-          // to their async counterparts and multi-buffered. Loads at earlier
-          // pipeline stages are likely to be in a non-load partition, or used
-          // as an input to a dependent load in a load partition. It is
-          // possible to pipeline them, but for simplicity we do not that for
-          // now.
           return WalkResult::advance();
         }
 
