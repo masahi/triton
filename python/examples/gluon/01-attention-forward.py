@@ -74,15 +74,13 @@ def Channel(T, alloc_fn):
         ready_bars: gl.shared_memory_descriptor
         empty_bars: gl.shared_memory_descriptor
         num_buffers: gl.constexpr
-        num_consumers: gl.constexpr
 
         @gluon.constexpr_function
-        def __init__(self, mem, ready_bars, empty_bars, num_buffers, num_consumers):
+        def __init__(self, mem, ready_bars, empty_bars, num_buffers):
             self.mem = mem
             self.ready_bars = ready_bars
             self.empty_bars = empty_bars
             self.num_buffers = gl.constexpr(num_buffers)
-            self.num_consumers = gl.constexpr(num_consumers)
 
         @gluon.jit
         def alloc(shape: gl.constexpr, dtype: gl.constexpr, layout: gl.constexpr, num_buffers: gl.constexpr,
@@ -93,8 +91,7 @@ def Channel(T, alloc_fn):
             for i in gl.static_range(num_buffers):
                 mbarrier.init(ready_bars.index(i), count=1)
                 mbarrier.init(empty_bars.index(i), count=num_consumers)
-                mbarrier.arrive(empty_bars.index(i), count=num_consumers)
-            return ChannelType(mem, ready_bars, empty_bars, num_buffers, num_consumers)
+            return ChannelType(mem, ready_bars, empty_bars, num_buffers)
 
         @gluon.jit
         def acquire_producer(self, counter):
@@ -117,16 +114,16 @@ def Channel(T, alloc_fn):
             return mem, empty_bar
 
         @gluon.jit
-        def create_counter(self):
-            return BarrierCounter(gl.to_tensor(0), gl.to_tensor(0), self.num_buffers)
+        def create_counter(self, init_phase):
+            return BarrierCounter(gl.to_tensor(0), gl.to_tensor(init_phase), self.num_buffers)
 
         @gluon.jit
         def create_producer(self):
-            return Producer(self, self.create_counter())
+            return Producer(self, self.create_counter(1))
 
         @gluon.jit
         def create_consumer(self):
-            return Consumer(self, self.create_counter())
+            return Consumer(self, self.create_counter(0))
 
         @gluon.jit
         def release(self):
@@ -1050,3 +1047,7 @@ def bench(Z, H, N_CTX, HEAD_DIM, causal, provider):
 
 if __name__ == "__main__":
     bench.run(save_path=".", print_data=True)
+
+
+# test_op(2, 32, 1024, 128, False, torch.bfloat16, profile=False)
+# print("ok")
