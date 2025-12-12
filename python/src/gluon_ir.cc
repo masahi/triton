@@ -747,9 +747,10 @@ void init_gluon_ir(py::module &&m) {
              self.create<ttng::WaitBarrierOp>(memDesc, phase, pred, deps);
            })
       .def("create_mbarrier_arrive",
-           [](GluonOpBuilder &self, Value memDesc, int count, Value pred) {
-             self.create<ttng::ArriveBarrierOp>(memDesc, count, pred,
+           [](GluonOpBuilder &self, Value memDesc, int count, Value pred, bool multithreaded) {
+             auto op = self.create<ttng::ArriveBarrierOp>(memDesc, count, pred,
                                                 mlir::UnitAttr());
+	     op.setMultiThreaded(multithreaded);
            })
       .def("create_tcgen05_mma",
            [](GluonOpBuilder &self, Value a, Value b, Value acc, Value useAcc,

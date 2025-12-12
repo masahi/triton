@@ -84,13 +84,13 @@ def Channel(T, alloc_fn):
 
         @gluon.jit
         def alloc(shape: gl.constexpr, dtype: gl.constexpr, layout: gl.constexpr, num_buffers: gl.constexpr,
-                  num_consumers: gl.constexpr = 1):
+                  producer_arrival_count: gl.constexpr, consumer_arrival_count: gl.constexpr):
             mem = alloc_fn(dtype, [num_buffers] + shape, layout)
             ready_bars = gl.allocate_shared_memory(gl.int64, [num_buffers, 1], mbarrier.MBarrierLayout())
             empty_bars = gl.allocate_shared_memory(gl.int64, [num_buffers, 1], mbarrier.MBarrierLayout())
             for i in gl.static_range(num_buffers):
-                mbarrier.init(ready_bars.index(i), count=1)
-                mbarrier.init(empty_bars.index(i), count=num_consumers)
+                mbarrier.init(ready_bars.index(i), count=producer_arrival_count)
+                mbarrier.init(empty_bars.index(i), count=consumer_arrival_count)
             return ChannelType(mem, ready_bars, empty_bars, num_buffers)
 
         @gluon.jit
@@ -175,10 +175,10 @@ TensorMemoryChannel, TensorMemoryProducer, TensorMemoryConsumer = Channel(tensor
 
 
 @gluon.jit
-def get_desc_channel(desc, num_buffers: gl.constexpr, num_consumers: gl.constexpr = 1):
+def get_desc_channel(desc, num_buffers: gl.constexpr):
     shape: gl.constexpr = desc.block_type.shape
     layout: gl.constexpr = desc.layout
-    return SharedMemoryChannel.alloc(shape, desc.dtype, layout, num_buffers, num_consumers)
+    return SharedMemoryChannel.alloc(shape, desc.dtype, layout, num_buffers, 1, 1)
 
 
 @gluon.jit
@@ -625,7 +625,7 @@ def _softmax_inner_loop(tile_id: gl.constexpr, config, prog,  #
 
         alpha_tmem = _borrow_s_as_alpha(config, s_tmem)
         alpha_tmem.store(gl.convert_layout(alpha.expand_dims(1), config.alpha_2d_layout))
-        mbarrier.arrive(corr_bar, count=1)
+        mbarrier.arrive(corr_bar, count=1, multithreaded=True)
 
         rowmax = float2.pack(-m_ij[:, None].broadcast_to(qk.shape), axis=1)
         qk = float2.pack(qk, axis=1)
@@ -643,11 +643,11 @@ def _softmax_inner_loop(tile_id: gl.constexpr, config, prog,  #
         p_tmem = _borrow_s_as_p(config, s_tmem)
         p = _compute_and_store_exp2(config, qk, p_tmem)
 
-        mbarrier.arrive(s_bar, count=1)
+        mbarrier.arrive(s_bar, count=1, multithreaded=True)
         _, corr_bar, corr_producer = corr_producer.acquire()
 
         if config.use_exp2_turnstile:
-            mbarrier.arrive(exp_bar, count=1)
+            mbarrier.arrive(exp_bar, count=1, multithreaded=True)
 
         l_ij = float2.pack2(*_split_n(p)).sum(axis=1)
         l_ij = Float2Tensor(gl.convert_layout(l_ij.value, l_i.value.type.layout, assert_trivial=True))
@@ -696,10 +696,10 @@ def _softmax_tile(tile_id: gl.constexpr, config, M, desc_o, STAGE: gl.constexpr,
         m_i_tmem.store(gl.convert_layout(m_i.expand_dims(1), config.alpha_2d_layout))
         l_i_tmem.store(gl.convert_layout(l_i.expand_dims(1), config.alpha_2d_layout))
 
-        mbarrier.arrive(corr_bar, count=1)
+        mbarrier.arrive(corr_bar, count=1, multithreaded=True)
         _, corr_bar, corr_producer = corr_producer.acquire()
 
-        mbarrier.arrive(s_bar, count=1)
+        mbarrier.arrive(s_bar, count=1, multithreaded=True)
 
 
 @gluon.jit
@@ -746,7 +746,7 @@ def _attn_fwd_correction_rescale(config, s_tmem, corr_consumer, o_consumer):
 
     _, corr_bar, corr_consumer = corr_consumer.acquire()
     alpha = _borrow_s_as_alpha(config, s_tmem).load(config.alpha_2d_layout)
-    mbarrier.arrive(corr_bar, count=1)
+    mbarrier.arrive(corr_bar, count=1, multithreaded=True)
     alpha = gl.convert_layout(alpha.reshape([config.SPLIT_M]), alpha_layout)
 
     alpha = float2.pack(alpha[:, None].broadcast_to(config.o_shape[0], config.SPLIT_D), axis=1)
@@ -755,7 +755,7 @@ def _attn_fwd_correction_rescale(config, s_tmem, corr_consumer, o_consumer):
         o = float2.pack(o_ref.load(config.o_splitn_layout), axis=1)
         o = o * alpha
         o_ref.store(float2.unpack(o, axis=1))
-    mbarrier.arrive(o_bar, count=1)
+    mbarrier.arrive(o_bar, count=1, multithreaded=True)
     return corr_consumer, o_consumer
 
 
@@ -769,7 +769,7 @@ def _attn_fwd_correction_epilogue(config, prog, s_tmem, M, corr_consumer, epi_pr
     m_i = gl.convert_layout(m_i, alpha_layout)
     l_i = l_i_tmem.load(config.alpha_2d_layout).reshape([config.SPLIT_M])
     l_i = gl.convert_layout(l_i, alpha_layout)
-    mbarrier.arrive(corr_bar, count=1)
+    mbarrier.arrive(corr_bar, count=1, multithreaded=True)
 
     o_smem, epi_bar, epi_producer = epi_producer.acquire()
     o_tmem, o_bar, o_consumer = o_consumer.acquire()
@@ -792,8 +792,8 @@ def _attn_fwd_correction_epilogue(config, prog, s_tmem, M, corr_consumer, epi_pr
         o_smem.slice(i * SPLIT_N, SPLIT_N, dim=1).store(float2.unpack(o, axis=1).to(config.dtype))
 
     fence_async_shared()
-    mbarrier.arrive(epi_bar, count=1)
-    mbarrier.arrive(o_bar, count=1)
+    mbarrier.arrive(epi_bar, count=1, multithreaded=True)
+    mbarrier.arrive(o_bar, count=1, multithreaded=True)
 
     m_i += gl.log2(l_i)
     coalesced: gl.constexpr = gl.BlockedLayout([1], [32], [config.num_warps], [0])
@@ -824,9 +824,9 @@ def _attn_fwd_correction(config, chnls, descs, M, STAGE: gl.constexpr):
         num_corrections = (hi - lo) // config.BLOCK_N
 
         _, corr0_bar, corr0_consumer = corr0_consumer.acquire()
-        mbarrier.arrive(corr0_bar, count=1)
+        mbarrier.arrive(corr0_bar, count=1, multithreaded=True)
         _, corr1_bar, corr1_consumer = corr1_consumer.acquire()
-        mbarrier.arrive(corr1_bar, count=1)
+        mbarrier.arrive(corr1_bar, count=1, multithreaded=True)
 
         for i in range(num_corrections - 1):
             corr0_consumer, o_consumer = _attn_fwd_correction_rescale(config, s0_tmem, corr0_consumer, o_consumer)
@@ -858,13 +858,22 @@ def attention_kernel(  #
 
     q_chnl = get_desc_channel(desc_q, num_buffers=2)
     kv_chnl = get_desc_channel(desc_k, num_buffers=config.num_kv_buffers)
-    o_chnl = TensorMemoryChannel.alloc(config.o_shape, gl.float32, config.o_tmem_layout, num_buffers=2)
-    epi_chnl = SharedMemoryChannel.alloc(config.o_shape, config.dtype, gl.constexpr(desc_o.layout), num_buffers=2)
-    s0_chnl = TensorMemoryChannel.alloc(config.qk_shape, gl.float32, config.qk_tmem_layout, num_buffers=1)
-    s1_chnl = TensorMemoryChannel.alloc(config.qk_shape, gl.float32, config.qk_tmem_layout, num_buffers=1)
-    c0_chnl = SharedMemoryChannel.alloc([1], gl.int8, gl.constexpr(mbarrier.MBarrierLayout()), num_buffers=1)
-    c1_chnl = SharedMemoryChannel.alloc([1], gl.int8, gl.constexpr(mbarrier.MBarrierLayout()), num_buffers=1)
-    exp_turnstile = SharedMemoryChannel.alloc([1], gl.int8, gl.constexpr(mbarrier.MBarrierLayout()), num_buffers=1)
+    num_softmax_warps: gl.constexpr = 4
+    num_correction_warps: gl.constexpr = 4 # num_warps
+    o_chnl = TensorMemoryChannel.alloc(config.o_shape, gl.float32, config.o_tmem_layout, num_buffers=2,
+                                       producer_arrival_count=1, consumer_arrival_count=num_correction_warps * 32)
+    epi_chnl = SharedMemoryChannel.alloc(config.o_shape, config.dtype, gl.constexpr(desc_o.layout), num_buffers=2,
+                                         producer_arrival_count=num_correction_warps * 32, consumer_arrival_count=1)
+    s0_chnl = TensorMemoryChannel.alloc(config.qk_shape, gl.float32, config.qk_tmem_layout, num_buffers=1,
+                                        producer_arrival_count=1, consumer_arrival_count=num_softmax_warps * 32)
+    s1_chnl = TensorMemoryChannel.alloc(config.qk_shape, gl.float32, config.qk_tmem_layout, num_buffers=1,
+                                        producer_arrival_count=1, consumer_arrival_count=num_softmax_warps * 32)
+    c0_chnl = SharedMemoryChannel.alloc([1], gl.int8, gl.constexpr(mbarrier.MBarrierLayout()), num_buffers=1,
+                                        producer_arrival_count=num_softmax_warps * 32, consumer_arrival_count=num_correction_warps * 32)
+    c1_chnl = SharedMemoryChannel.alloc([1], gl.int8, gl.constexpr(mbarrier.MBarrierLayout()), num_buffers=1,
+                                        producer_arrival_count=num_softmax_warps * 32, consumer_arrival_count=num_correction_warps * 32)
+    exp_turnstile = SharedMemoryChannel.alloc([1], gl.int8, gl.constexpr(mbarrier.MBarrierLayout()), num_buffers=1,
+                                              producer_arrival_count=num_softmax_warps * 32, consumer_arrival_count=num_softmax_warps * 32)
 
     chnls = (q_chnl, kv_chnl, o_chnl, epi_chnl, s0_chnl, s1_chnl, c0_chnl, c1_chnl, exp_turnstile)
     descs = (desc_q, desc_k, desc_v, desc_o)
@@ -875,7 +884,7 @@ def attention_kernel(  #
         (_attn_fwd_mma, (config, chnls, descs, M, STAGE)),
         (_attn_fwd_load, (config, chnls, descs, M, STAGE)),
         (_attn_fwd_epilogue, (config, chnls, descs, M, STAGE)),
-    ], [4, 4, 1, 1, 1], [192, 192, 24, 24, 24])
+    ], [num_softmax_warps, num_softmax_warps, 1, 1, 1], [192, 192, 24, 24, 24])
 
     q_chnl.release()
     kv_chnl.release()
@@ -933,12 +942,15 @@ def attention_forward(q, k, v, causal, sm_scale):
     num_pid_n = q.shape[0] * q.shape[1]
     grid = min(NUM_SMS, num_pid_m * num_pid_n)
 
-    attention_kernel[(grid, )](
+    out = attention_kernel[(grid, )](
         sm_scale, M, q.shape[0], q.shape[1], q.shape[2],  #
         desc_q, desc_k, desc_v, desc_o,  #
         BLOCK_M, BLOCK_N, HEAD_DIM_K, GROUP_SIZE_N, NUM_SMS,  #
         stage, torch_dtype_to_triton(q.dtype),  #
         num_warps=4, maxnreg=128)
+
+    # print(out.asm["ttgir"])
+    # print(out.asm["ptx"])
 
     return o, M
 
@@ -1047,7 +1059,6 @@ def bench(Z, H, N_CTX, HEAD_DIM, causal, provider):
 
 if __name__ == "__main__":
     bench.run(save_path=".", print_data=True)
-
 
 # test_op(2, 32, 1024, 128, False, torch.bfloat16, profile=False)
 # print("ok")
