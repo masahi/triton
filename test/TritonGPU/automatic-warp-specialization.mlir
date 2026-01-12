@@ -246,7 +246,7 @@ tt.func public @attention_forward(
     %diff = arith.subf %m_i, %row_max : tensor<256xf32, #ttg.slice<{dim = 1, parent = #blocked}>>
     %alpha = math.exp2 %diff : tensor<256xf32, #ttg.slice<{dim = 1, parent = #blocked}>>
 
-    %l_ij = "tt.reduce"(%softmax) <{axis = 1 : i32}> ({
+    %l_ij = tt.reduce(%softmax) {axis = 1 : i32} ({
     ^bb0(%arg29: f32, %arg30: f32):
       %68 = arith.addf %arg29, %arg30 : f32
       tt.reduce.return %68 : f32

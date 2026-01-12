@@ -50,11 +50,11 @@ tt.func private @reduce_linear_layout(%arg0: tensor<32x16xi32, #linear>) -> tens
   // CHECK-NEXT: [[DST0:%.*]] = insertvalue { i32, i32 } undef, i32 [[WSUM3]], 0
   // CHECK-NEXT: [[DST1:%.*]] = insertvalue { i32, i32 } [[DST0]], i32 [[WSUM7]], 1
 
-  %0 = "tt.reduce"(%arg0) ({
+  %0 = tt.reduce(%arg0) {axis = 0 : i32} ({
   ^bb0(%arg1: i32, %arg2: i32):
     %1 = arith.addi %arg1, %arg2 : i32
     tt.reduce.return %1 : i32
-  }) {axis = 0 : i32} : (tensor<32x16xi32, #linear>) -> tensor<16xi32, #ttg.slice<{dim = 0, parent = #linear}>>
+  }) : (tensor<32x16xi32, #linear>) -> tensor<16xi32, #ttg.slice<{dim = 0, parent = #linear}>>
 
   // CHECK-NEXT: ret { i32, i32 } [[DST1]]
   tt.return %0 : tensor<16xi32, #ttg.slice<{dim = 0, parent = #linear}>>

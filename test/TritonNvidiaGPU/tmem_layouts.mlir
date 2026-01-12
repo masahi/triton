@@ -139,7 +139,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 tt.func public @tmem_load_reduce(%arg0: !ttg.memdesc<128x64xf32, #tmem, #ttng.tensor_memory>) -> tensor<128xf32, #ttg.slice<{dim = 1, parent = #linear}>> {
   %0 = ttng.tmem_load %arg0 : !ttg.memdesc<128x64xf32, #tmem, #ttng.tensor_memory> -> tensor<128x64xf32, #linear>
   // CHECK: ttng.tmem_load %{{.*}} : !ttg.memdesc<128x64xf32, #tmem, #ttng.tensor_memory> -> tensor<128x64xf32, #linear1>
-  %1 = "tt.reduce"(%0) <{axis = 1 : i32}> ({
+  %1 = tt.reduce(%0) {axis = 1 : i32} ({
   ^bb0(%arg2: f32, %arg3: f32):
     %2 = arith.addf %arg2, %arg3 : f32
     tt.reduce.return %2 : f32

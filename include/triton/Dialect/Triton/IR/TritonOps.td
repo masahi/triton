@@ -740,14 +740,26 @@ def TT_DotScaledOp : TT_Op<"dot_scaled", [Pure,
 //
 def TT_ReduceOp: TT_Op<"reduce",
                        [Pure,
-                        SameOperandsShape,
-                        SameOperandsEncoding,
                         SingleBlock,
+                        AttrSizedOperandSegments,
                         DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
     let summary = "Reduction using generic combination algorithm";
-    let arguments = (ins Variadic<TT_Tensor>:$srcs, I32Attr:$axis);
+    let description = [{
+      Reduces the input tensor(s) along the specified axis using the combine
+      function. If an initial value is provided, it determines the accumulator
+      type and the combine function receives (acc: InitType, val: SrcType).
+      Otherwise, the combine function receives (acc: SrcType, val: SrcType).
+    }];
+    let arguments = (ins Variadic<TT_Tensor>:$srcs, Optional<AnyType>:$init, I32Attr:$axis);
     let results = (outs Variadic<TT_Type>:$result);
     let regions = (region SizedRegion<1>:$combineOp);
+    let builders = [
+        // Builder without init value (backward compatible)
+        OpBuilder<(ins "ValueRange":$srcs, "int":$axis)>,
+        // Builder with optional init value
+        OpBuilder<(ins "ValueRange":$srcs, "int":$axis, "Value":$init)>,
+    ];
+    let hasCustomAssemblyFormat = 1;
     let hasVerifier = 1;
     let hasRegionVerifier = 1;
     let extraClassDeclaration = [{
@@ -758,6 +770,9 @@ def TT_ReduceOp: TT_Op<"reduce",
       // Returns the CombineOp iff this ReduceOp's region contains only
       // one CombineOp other than the return, or nullptr if not applicable.
       ::mlir::Operation *getSingleCombiner();
+
+      // Returns true if an initial value is provided for the reduction.
+      bool hasInitialValue() { return getInit() != nullptr; }
     }];
 }
 

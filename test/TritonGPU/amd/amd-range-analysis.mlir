@@ -1702,7 +1702,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
       %32 = tt.broadcast %31 : tensor<1x128xi32, #blocked3> -> tensor<32x128xi32, #blocked3>
       %33 = tt.addptr %18, %32 : tensor<32x128x!tt.ptr<f32>, #blocked3>, tensor<32x128xi32, #blocked3>
       %34 = tt.load %33 : tensor<32x128x!tt.ptr<f32>, #blocked3>
-      %35 = "tt.reduce"(%34) <{axis = 1 : i32}> ({
+      %35 = tt.reduce(%34) {axis = 1 : i32} ({
       ^bb0(%arg5: f32, %arg6: f32):
         %38 = arith.maxnumf %arg5, %arg6 : f32
         tt.reduce.return %38 : f32

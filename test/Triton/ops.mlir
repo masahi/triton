@@ -87,61 +87,61 @@ tt.func @reduce_ops_infer(%ptr: !tt.ptr<f32>, %v : tensor<1x2x4xf32>) {
   // CHECK-SAME: axis = 0
   // CHECK: tt.reduce.return
   // CHECK-NEXT: (tensor<1x2x4xf32>) -> tensor<2x4xf32>
-  %a = "tt.reduce" (%v) ({
+  %a = tt.reduce(%v) {axis = 0 : i32} ({
   ^bb0(%arg0: f32, %arg1: f32):
     %add = arith.addf %arg0, %arg1 : f32
     tt.reduce.return %add : f32
-  }) {axis = 0 : i32}  : (tensor<1x2x4xf32>) -> tensor<2x4xf32>
+  })  : (tensor<1x2x4xf32>) -> tensor<2x4xf32>
 
   // CHECK: tt.reduce
   // CHECK-SAME: axis = 1
   // CHECK: tt.reduce.return
   // CHECK-NEXT: (tensor<1x2x4xf32>) -> tensor<1x4xf32>
-  %b = "tt.reduce" (%v) ({
+  %b = tt.reduce(%v) {axis = 1 : i32} ({
   ^bb0(%arg0: f32, %arg1: f32):
     %add = arith.addf %arg0, %arg1 : f32
     tt.reduce.return %add : f32
-  }) {axis = 1 : i32}  : (tensor<1x2x4xf32>) -> tensor<1x4xf32>
+  })  : (tensor<1x2x4xf32>) -> tensor<1x4xf32>
 
   // CHECK: tt.reduce
   // CHECK-SAME: axis = 2
   // CHECK: tt.reduce.return
   // CHECK-NEXT: (tensor<1x2x4xf32>) -> tensor<1x2xf32>
-  %c = "tt.reduce" (%v) ({
+  %c = tt.reduce(%v) {axis = 2 : i32} ({
   ^bb0(%arg0: f32, %arg1: f32):
     %add = arith.addf %arg0, %arg1 : f32
     tt.reduce.return %add : f32
-  }) {axis = 2 : i32}  : (tensor<1x2x4xf32>) -> tensor<1x2xf32>
+  })  : (tensor<1x2x4xf32>) -> tensor<1x2xf32>
 
   // CHECK: tt.reduce
   // CHECK-SAME: axis = 1
   // CHECK: tt.reduce.return
   // CHECK-NEXT: (tensor<1x4xf32>) -> tensor<1xf32>
-  %e = "tt.reduce" (%b) ({
+  %e = tt.reduce(%b) {axis = 1 : i32} ({
   ^bb0(%arg0: f32, %arg1: f32):
     %add = arith.addf %arg0, %arg1 : f32
     tt.reduce.return %add : f32
-  }) {axis = 1 : i32}  : (tensor<1x4xf32>) -> tensor<1xf32>
+  })  : (tensor<1x4xf32>) -> tensor<1xf32>
 
   // CHECK: tt.reduce
   // CHECK-SAME: axis = 0
   // CHECK: tt.reduce.return
   // CHECK-NEXT: (tensor<2x4xf32>) -> tensor<4xf32>
-  %f = "tt.reduce" (%a) ({
+  %f = tt.reduce(%a) {axis = 0 : i32} ({
   ^bb0(%arg0: f32, %arg1: f32):
     %add = arith.addf %arg0, %arg1 : f32
     tt.reduce.return %add : f32
-  }) {axis = 0 : i32}  : (tensor<2x4xf32>) -> tensor<4xf32>
+  })  : (tensor<2x4xf32>) -> tensor<4xf32>
 
   // CHECK: tt.reduce
   // CHECK-SAME: axis = 0
   // CHECK: tt.reduce.return
   // CHECK-NEXT: (tensor<4xf32>) -> f32
-  %g = "tt.reduce" (%f) ({
+  %g = tt.reduce(%f) {axis = 0 : i32} ({
   ^bb0(%arg0: f32, %arg1: f32):
     %add = arith.addf %arg0, %arg1 : f32
     tt.reduce.return %add : f32
-  }) {axis = 0 : i32}  : (tensor<4xf32>) -> f32
+  })  : (tensor<4xf32>) -> f32
 
   // Avoid optimizations for c, e, and g
   %ptr1x2 = tt.splat %ptr : !tt.ptr<f32> -> tensor<1x2x!tt.ptr<f32>>

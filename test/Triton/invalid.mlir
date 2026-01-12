@@ -111,12 +111,12 @@ tt.func public @fn(%arg0: f32, %arg1: f32) {
 // -----
 
 tt.func public @fn(%v: tensor<4x128xf64>) {
-    // expected-error @+1 {{operand types and result types}}
-    %a = "tt.reduce" (%v) ({
+    // expected-error @+1 {{result type 'f32' does not match expected type 'f64'}}
+    %a = tt.reduce(%v) {axis = 0 : i32} ({
     ^bb0(%arg0: f32, %arg1: f32):
       %add = arith.addf %arg0, %arg1 : f32
       tt.reduce.return %add : f32
-    }) {axis = 0 : i32}  : (tensor<4x128xf64>) -> tensor<128xf32>
+    })  : (tensor<4x128xf64>) -> tensor<128xf32>
     tt.return
 }
 
@@ -124,11 +124,11 @@ tt.func public @fn(%v: tensor<4x128xf64>) {
 
 tt.func public @fn(%v: tensor<4x128xf32>) {
     // expected-error @+1 {{axis out of bounds}}
-    %a = "tt.reduce" (%v) ({
+    %a = tt.reduce(%v) {axis = 2 : i32} ({
     ^bb0(%arg0: f32, %arg1: f32):
       %add = arith.addf %arg0, %arg1 : f32
       tt.reduce.return %add : f32
-    }) {axis = 2 : i32}  : (tensor<4x128xf32>) -> tensor<4xf32>
+    })  : (tensor<4x128xf32>) -> tensor<4xf32>
     tt.return
 }
 
@@ -136,7 +136,7 @@ tt.func public @fn(%v: tensor<4x128xf32>) {
 
 tt.func @reduce_different_input_shapes(%arg0: tensor<32x32x64xf32>, %arg1: tensor<16x32x64xf32>) -> (tensor<32x64xf32>, tensor<16x64xf32>) {
     // expected-error @below {{op requires the same shape for all operands}}
-    %0:2 = "tt.reduce" (%arg0, %arg1) <{axis = 1 : i32}> ({
+    %0:2 = tt.reduce(%arg0, %arg1) {axis = 1 : i32} ({
     ^bb0(%acc0: f32, %acc1: f32, %cur0: f32, %cur1: f32):
       %1 = arith.addf %acc0, %cur0 : f32
       %2 = arith.addf %acc1, %cur1 : f32
@@ -172,12 +172,12 @@ tt.func public @fn(%v1: tensor<4x128xf32>, %v2: tensor<4x128xi64>) {
 // -----
 
 tt.func public @fn(%v1: tensor<4x128xf32>, %v2: tensor<4x128xi64>) {
-    // expected-error @+1 {{operand types and result types}}
-    %a, %b = "tt.reduce" (%v1, %v2) ({
+    // expected-error @+1 {{result type 'i64' does not match expected type 'f32'}}
+    %a, %b = tt.reduce(%v1, %v2) {axis = 0 : i32} ({
     ^bb0(%arg0: f32, %arg1: i32, %arg2: f32, %arg3: i32):
       %add = arith.addf %arg0, %arg2 : f32
       tt.reduce.return %add, %arg1 : f32, i32
-    }) {axis = 0 : i32}  : (tensor<4x128xf32>, tensor<4x128xi64>) -> (tensor<128xi64>, tensor<128xf32>)
+    })  : (tensor<4x128xf32>, tensor<4x128xi64>) -> (tensor<128xi64>, tensor<128xf32>)
     tt.return
 }
 
@@ -656,4 +656,59 @@ module attributes {"ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32,
     %result = tt.dot %a, %b, %cst, inputPrecision = ieee : tensor<16x16xf32, #dot_operand_a> * tensor<16x16xf32, #dot_operand_b> -> tensor<16x16xf32, #mma>
     tt.return
   }
+}
+
+// -----
+// Reduce with init: result type mismatch (result should match init type, not input type)
+
+tt.func public @reduce_init_result_type_mismatch(%v: tensor<128xf16>, %init: f32) {
+    // expected-error @+1 {{result type}}
+    %a = tt.reduce(%v, %init) {axis = 0 : i32} ({
+    ^bb0(%acc: f32, %val: f16):
+      %val_f32 = arith.extf %val : f16 to f32
+      %sum = arith.addf %acc, %val_f32 : f32
+      tt.reduce.return %sum : f32
+    }) : (tensor<128xf16>, f32) -> f16
+    tt.return
+}
+
+// -----
+// Reduce with init: combine function acc type mismatch
+
+tt.func public @reduce_init_acc_type_mismatch(%v: tensor<128xf16>, %init: f32) {
+    // expected-error @+1 {{type mismatch on combine operation}}
+    %a = tt.reduce(%v, %init) {axis = 0 : i32} ({
+    ^bb0(%acc: f16, %val: f16):
+      %sum = arith.addf %acc, %val : f16
+      tt.reduce.return %sum : f16
+    }) : (tensor<128xf16>, f32) -> f32
+    tt.return
+}
+
+// -----
+// Reduce with init: combine function val type mismatch
+
+tt.func public @reduce_init_val_type_mismatch(%v: tensor<128xf16>, %init: f32) {
+    // expected-error @+1 {{type mismatch on combine operation}}
+    %a = tt.reduce(%v, %init) {axis = 0 : i32} ({
+    ^bb0(%acc: f32, %val: f32):
+      %sum = arith.addf %acc, %val : f32
+      tt.reduce.return %sum : f32
+    }) : (tensor<128xf16>, f32) -> f32
+    tt.return
+}
+
+// -----
+// Reduce with init: combine function return type mismatch
+
+tt.func public @reduce_init_return_type_mismatch(%v: tensor<128xf16>, %init: f32) {
+    // expected-error @+1 {{type mismatch on combine operation return}}
+    %a = tt.reduce(%v, %init) {axis = 0 : i32} ({
+    ^bb0(%acc: f32, %val: f16):
+      %val_f32 = arith.extf %val : f16 to f32
+      %sum = arith.addf %acc, %val_f32 : f32
+      %result = arith.truncf %sum : f32 to f16
+      tt.reduce.return %result : f16
+    }) : (tensor<128xf16>, f32) -> f32
+    tt.return
 }

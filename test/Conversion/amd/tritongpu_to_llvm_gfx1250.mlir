@@ -20,7 +20,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
   // GFX1250-LABEL: reduce_16x16
   tt.func @reduce_16x16(%input: tensor<128x128xf32, #mma>) {
     // GFX1250-COUNT-2: llvm.call_intrinsic "llvm.amdgcn.permlane16.swap"
-    %0 = "tt.reduce"(%input) <{axis = 1 : i32}> ({
+    %0 = tt.reduce(%input) {axis = 1 : i32} ({
       ^bb0(%arg1: f32 , %arg2: f32):
       %2 = "arith.maxnumf"(%arg1, %arg2) : (f32, f32) -> f32
       tt.reduce.return %2 : f32 }) : (tensor<128x128xf32, #mma>) -> tensor<128xf32, #ttg.slice<{dim = 1, parent = #mma}>>

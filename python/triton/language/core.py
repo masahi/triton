@@ -2635,24 +2635,41 @@ def _insertion_guard(builder):
 
 @_tensor_member_fn
 @builtin
-def reduce(input, axis, combine_fn, keep_dims=False, _semantic=None, _generator=None):
+def reduce(input, axis, combine_fn, keep_dims=False, initial=None, _semantic=None, _generator=None):
     """Applies the combine_fn to all elements in :code:`input` tensors along the provided :code:`axis`
 
     :param input: the input tensor, or tuple of tensors
     :type input: Tensor
     :param axis: the dimension along which the reduction should be done. If None, reduce all dimensions
     :type axis: int | None
-    :param combine_fn: a function to combine two groups of scalar tensors (must be marked with @triton.jit)
+    :param combine_fn: a function to combine two groups of scalar tensors (must be marked with @triton.jit).
+                       If initial is provided, the signature is combine_fn(acc, val) where acc has the
+                       type of initial and val has the type of input. Otherwise, both have the input type.
     :type combine_fn: Callable
     :param keep_dims: if true, keep the reduced dimensions with length 1
     :type keep_dims: bool
+    :param initial: optional initial value for the reduction. Its dtype determines the accumulator
+                    type and output dtype, enabling mixed-precision reductions.
+    :type initial: Tensor, optional
 
     """
     if isinstance(input, tensor):
-        return reduce((input, ), axis, combine_fn, keep_dims=keep_dims, _semantic=_semantic, _generator=_generator)[0]
+        return reduce((input, ), axis, combine_fn, keep_dims=keep_dims, initial=initial,
+                      _semantic=_semantic, _generator=_generator)[0]
+
+    initial = _unwrap_if_constexpr(initial)
 
     def make_combine_region(reduce_op):
-        param_types = [t.type.scalar for t in input] * 2
+        # If initial is provided, accumulator type comes from initial, value type from input
+        # combine_fn signature: (acc: InitType, val: InputType) -> InitType
+        if initial is not None:
+            acc_type = initial.type.scalar
+            val_type = input[0].type.scalar
+            param_types = [acc_type, val_type]
+        else:
+            # Original behavior: both parameters have input type
+            param_types = [t.type.scalar for t in input] * 2
+
         region = reduce_op.get_region(0)
         builder = _semantic.builder
         with _insertion_guard(builder):
@@ -2675,7 +2692,7 @@ def reduce(input, axis, combine_fn, keep_dims=False, _semantic=None, _generator=
     keep_dims = _unwrap_if_constexpr(keep_dims)
     if axis is not None:
         axis = _wrap_axis(axis, len(input[0].shape))
-    ret = _semantic.reduction(input, axis, make_combine_region)
+    ret = _semantic.reduction(input, axis, make_combine_region, init=initial)
     if keep_dims:
         if axis is not None:
             ret = tuple(expand_dims(t, axis, _semantic=_semantic) for t in ret)

@@ -2507,6 +2507,145 @@ def test_reduce(op, dtype_str, shape, axis, keep_dims, num_ctas, device):
             np.testing.assert_equal(z_ref, z_tri)
 
 
+# ---------------
+# test reduce with initial value (mixed-precision accumulation)
+# ---------------
+
+
+@pytest.mark.parametrize("input_dtype, acc_dtype", [
+    ("float16", "float32"),  # f16 input with f32 accumulator
+    ("bfloat16", "float32"),  # bf16 input with f32 accumulator
+    ("float32", "float32"),  # same type (backward compat)
+    ("int16", "int32"),  # integer widening
+])
+@pytest.mark.parametrize("shape", [(128,), (32, 64)])
+@pytest.mark.parametrize("axis", [0, -1])
+def test_reduce_with_initial(input_dtype, acc_dtype, shape, axis, device):
+    """Test reduce with initial value for mixed-precision accumulation."""
+    check_type_supported(input_dtype, device)
+
+    @triton.jit
+    def reduce_sum_with_init(X, Z, init_val, BLOCK: tl.constexpr, AXIS: tl.constexpr):
+        # For 1D
+        if BLOCK == 128:
+            x = tl.load(X + tl.arange(0, BLOCK))
+        # For 2D (32x64)
+        else:
+            offs = tl.arange(0, 32)[:, None] * 64 + tl.arange(0, 64)[None, :]
+            x = tl.load(X + offs)
+
+        @triton.jit
+        def combine_fn(acc, val):
+            # acc is accumulator type, val is input type
+            # Cast val to acc type and add
+            return acc + val.to(acc.dtype)
+
+        result = tl.reduce(x, axis=AXIS, combine_fn=combine_fn, initial=init_val)
+        if BLOCK == 128:
+            tl.store(Z, result)
+        else:
+            if AXIS == 0 or AXIS == -2:
+                tl.store(Z + tl.arange(0, 64), result)
+            else:
+                tl.store(Z + tl.arange(0, 32), result)
+
+    # Create input tensor
+    if 'int' in input_dtype:
+        x = torch.randint(-10, 10, shape, device=device, dtype=getattr(torch, input_dtype))
+    else:
+        x = torch.randn(shape, device=device, dtype=getattr(torch, input_dtype))
+
+    # Initial value
+    acc_torch_dtype = getattr(torch, acc_dtype)
+    init_val = torch.tensor(0, device=device, dtype=acc_torch_dtype)
+
+    # Output tensor
+    if len(shape) == 1:
+        z = torch.empty(1, device=device, dtype=acc_torch_dtype)
+    else:
+        np_axis = axis if axis >= 0 else len(shape) + axis
+        out_shape = [s for i, s in enumerate(shape) if i != np_axis]
+        z = torch.empty(out_shape, device=device, dtype=acc_torch_dtype)
+
+    # Run kernel
+    BLOCK = shape[0] if len(shape) == 1 else 32
+    reduce_sum_with_init[(1,)](x, z, init_val, BLOCK=BLOCK, AXIS=axis)
+
+    # Reference: sum in higher precision
+    np_axis = axis if axis >= 0 else len(shape) + axis
+    z_ref = x.to(acc_torch_dtype).sum(dim=np_axis)
+
+    # Compare
+    torch.testing.assert_close(z, z_ref, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.parametrize("init_value", [0.0, 1.0, 100.0])
+def test_reduce_with_nonzero_initial(init_value, device):
+    """Test reduce with non-zero initial value."""
+
+    @triton.jit
+    def reduce_sum_with_init(X, Z, init_val, BLOCK: tl.constexpr):
+        x = tl.load(X + tl.arange(0, BLOCK))
+
+        @triton.jit
+        def add_fn(acc, val):
+            return acc + val
+
+        result = tl.reduce(x, axis=0, combine_fn=add_fn, initial=init_val)
+        tl.store(Z, result)
+
+    shape = (128,)
+    x = torch.randn(shape, device=device, dtype=torch.float32)
+    init_val = torch.tensor(init_value, device=device, dtype=torch.float32)
+    z = torch.empty(1, device=device, dtype=torch.float32)
+
+    reduce_sum_with_init[(1,)](x, z, init_val, BLOCK=shape[0])
+
+    # Reference: sum + initial value
+    z_ref = x.sum() + init_value
+
+    torch.testing.assert_close(z, z_ref.unsqueeze(0), rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize("op", ["max", "min"])
+def test_reduce_minmax_with_initial(op, device):
+    """Test min/max reduce with initial value (useful for handling empty slices)."""
+
+    @triton.jit
+    def reduce_minmax_with_init(X, Z, init_val, BLOCK: tl.constexpr, IS_MAX: tl.constexpr):
+        x = tl.load(X + tl.arange(0, BLOCK))
+
+        if IS_MAX:
+
+            @triton.jit
+            def combine_fn(acc, val):
+                return tl.maximum(acc, val)
+        else:
+
+            @triton.jit
+            def combine_fn(acc, val):
+                return tl.minimum(acc, val)
+
+        result = tl.reduce(x, axis=0, combine_fn=combine_fn, initial=init_val)
+        tl.store(Z, result)
+
+    shape = (128,)
+    x = torch.randn(shape, device=device, dtype=torch.float32)
+
+    if op == "max":
+        init_val = torch.tensor(float('-inf'), device=device, dtype=torch.float32)
+        z_ref = x.max()
+    else:
+        init_val = torch.tensor(float('inf'), device=device, dtype=torch.float32)
+        z_ref = x.min()
+
+    z = torch.empty(1, device=device, dtype=torch.float32)
+
+    reduce_minmax_with_init[(1,)](x, z, init_val, BLOCK=shape[0], IS_MAX=(op == "max"))
+
+    torch.testing.assert_close(z, z_ref.unsqueeze(0), rtol=1e-4, atol=1e-4)
+
+
 scan2d_shapes = [(8, 32), (16, 32), (32, 16), (2, 1024), (1024, 2), (32, 32), (1, 1024)]
 
 scan_configs = [(op, type, shape, axis, reverse, num_warps)

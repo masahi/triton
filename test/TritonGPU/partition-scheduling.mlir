@@ -59,13 +59,12 @@ tt.func public @attention_forward(
     %diff = arith.subf %m_i, %row_max : tensor<256xf32, #ttg.slice<{dim = 1, parent = #blocked}>>
     %alpha = math.exp2 %diff : tensor<256xf32, #ttg.slice<{dim = 1, parent = #blocked}>>
 
-    // CHECK: tt.reduce
-    %l_ij = "tt.reduce"(%softmax) <{axis = 1 : i32}> ({
+    // CHECK: tt.reduce{{.*}}ttg.partition.outputs = [array<i32: 0>]
+    %l_ij = tt.reduce(%softmax) {axis = 1 : i32} ({
     ^bb0(%arg29: f32, %arg30: f32):
       // CHECK-COUNT-2: ttg.partition = array<i32: 0>
       %68 = arith.addf %arg29, %arg30 : f32
       tt.reduce.return %68 : f32
-      // CHECK-NEXT: ttg.partition = array<i32: 0>, ttg.partition.outputs = [array<i32: 0>]
     }) : (tensor<256x64xf32, #blocked>) -> tensor<256xf32, #ttg.slice<{dim = 1, parent = #blocked}>>
     // CHECK-COUNT-8: ttg.partition = array<i32:
     %l_i_scaled = arith.mulf %l_i, %alpha : tensor<256xf32, #ttg.slice<{dim = 1, parent = #blocked}>>

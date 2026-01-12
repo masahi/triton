@@ -419,7 +419,7 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
       %17 = arith.subf %arg7, %13 {ttg.partition = array<i32: 0>} : tensor<256xf32, #ttg.slice<{dim = 1, parent = #blocked}>>
       %18 = math.exp2 %16 {ttg.partition = array<i32: 3>} : tensor<256xf32, #ttg.slice<{dim = 1, parent = #blocked}>>
       %19 = math.exp2 %17 {ttg.partition = array<i32: 0>} : tensor<256xf32, #ttg.slice<{dim = 1, parent = #blocked}>>
-      %20 = "tt.reduce"(%15) <{axis = 1 : i32}> ({
+      %20 = "tt.reduce"(%15) <{axis = 1 : i32, operandSegmentSizes = array<i32: 1, 0>}> ({
       ^bb0(%arg10: f32, %arg11: f32):
         %36 = arith.addf %arg10, %arg11 {ttg.partition = array<i32: 0>}: f32
         tt.reduce.return %36 {ttg.partition = array<i32: 0>} : f32

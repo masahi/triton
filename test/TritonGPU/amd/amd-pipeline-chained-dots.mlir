@@ -83,7 +83,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
       %9 = tt.load %5 : tensor<64x16x!tt.ptr<f16>, #blocked>
       %10 = ttg.convert_layout %9 : tensor<64x16xf16, #blocked> -> tensor<64x16xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 2}>>
       %11 = tt.dot %arg1, %8, %cst : tensor<128x64xf16, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 2}>> * tensor<64x16xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 2}>> -> tensor<128x16xf32, #mma>
-      %12 = "tt.reduce"(%11) <{axis = 1 : i32}> ({
+      %12 = tt.reduce(%11) {axis = 1 : i32} ({
       ^bb0(%arg8: f32, %arg9: f32):
         %20 = arith.maxnumf %arg8, %arg9 : f32
         tt.reduce.return %20 : f32
@@ -144,7 +144,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
       %9 = tt.load %5 : tensor<64x16x!tt.ptr<f16>, #blocked>
       %10 = ttg.convert_layout %9 : tensor<64x16xf16, #blocked> -> tensor<64x16xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 2}>>
       %11 = tt.dot %arg1, %8, %cst : tensor<128x64xf16, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 2}>> * tensor<64x16xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 2}>> -> tensor<128x16xf32, #mma>
-      %12 = "tt.reduce"(%11) <{axis = 1 : i32}> ({
+      %12 = tt.reduce(%11) {axis = 1 : i32} ({
       ^bb0(%arg6: f32, %arg7: f32):
         %21 = arith.maxnumf %arg6, %arg7 : f32
         tt.reduce.return %21 : f32

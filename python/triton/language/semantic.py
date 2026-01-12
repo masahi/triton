@@ -1702,7 +1702,8 @@ class TritonSemantic(Generic[TensorTy]):
             res_ty = scalar_ty
         return self.tensor(x, res_ty)
 
-    def reduction(self, inputs: Sequence[TensorTy], axis: int, region_builder_fn) -> Tuple[TensorTy, ...]:
+    def reduction(self, inputs: Sequence[TensorTy], axis: int, region_builder_fn,
+                  init: TensorTy = None) -> Tuple[TensorTy, ...]:
         if axis is None:
             inputs = tuple(self.reshape(t, [t.numel.value], can_reorder=True) for t in inputs)
             axis = 0
@@ -1713,12 +1714,15 @@ class TritonSemantic(Generic[TensorTy]):
         ret_shape = [s for i, s in enumerate(shape) if i != axis]
         assert all(t.type.shape == shape for t in inputs), "all reduction inputs must have the same shape"
 
-        reduce_op = self.builder.create_reduce([t.handle for t in inputs], axis)
+        init_handle = init.handle if init is not None else None
+        reduce_op = self.builder.create_reduce([t.handle for t in inputs], axis, init_handle)
         region_builder_fn(reduce_op)
         assert reduce_op.verify()
 
+        # If init is provided, result type is based on init's type; otherwise input's type
+        result_scalar_ty = init.type.scalar if init is not None else inputs[0].type.scalar
         return tuple(
-            self.wrap_tensor(reduce_op.get_result(i), inputs[i].type.scalar, ret_shape) for i in range(len(inputs)))
+            self.wrap_tensor(reduce_op.get_result(i), result_scalar_ty, ret_shape) for i in range(len(inputs)))
 
 # ===----------------------------------------------------------------------===
 #                               Associative Scan

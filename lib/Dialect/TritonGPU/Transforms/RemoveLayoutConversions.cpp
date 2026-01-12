@@ -671,12 +671,13 @@ void LayoutPropagation::rewriteConditionOp(scf::ConditionOp conditionOp) {
   }
 }
 
-void LayoutPropagation::rewriteReduceToScalar(Operation *reduceOp) {
-  OpBuilder rewriter(reduceOp);
+void LayoutPropagation::rewriteReduceToScalar(Operation *op) {
+  OpBuilder rewriter(op);
   Attribute srcEncoding;
   // Since all the operands need to have the same encoding pick the first one
-  // and use it for all the operands.
-  for (Value operand : reduceOp->getOperands()) {
+  // and use it for all the operands. Only consider srcs, not the optional init.
+  ReduceOp reduceOp = cast<ReduceOp>(op);
+  for (Value operand : reduceOp.getSrcs()) {
     auto it = layouts.find(operand);
     if (it != layouts.end()) {
       srcEncoding = it->second.encodings[0];
@@ -685,9 +686,10 @@ void LayoutPropagation::rewriteReduceToScalar(Operation *reduceOp) {
   }
   if (!srcEncoding)
     return;
-  for (OpOperand &operand : reduceOp->getOpOperands()) {
-    Value newOperand = getValueAs(operand.get(), srcEncoding);
-    reduceOp->setOperand(operand.getOperandNumber(), newOperand);
+  // Only update layout for src operands, not the optional init
+  for (unsigned i = 0; i < reduceOp.getSrcs().size(); ++i) {
+    Value newOperand = getValueAs(reduceOp.getSrcs()[i], srcEncoding);
+    reduceOp.getSrcsMutable()[i].set(newOperand);
   }
 }
 

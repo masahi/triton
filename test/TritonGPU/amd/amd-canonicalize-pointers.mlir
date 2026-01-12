@@ -1215,11 +1215,11 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
     %22 = tt.broadcast %20 : tensor<1x1x16xi32, #ttg.blocked<{sizePerThread = [1, 1, 4], threadsPerWarp = [8, 1, 4], warpsPerCTA = [4, 1, 1], order = [2, 0, 1]}>> -> tensor<32x2x16xi32, #ttg.blocked<{sizePerThread = [1, 1, 4], threadsPerWarp = [8, 1, 4], warpsPerCTA = [4, 1, 1], order = [2, 0, 1]}>>
     %23 = tt.addptr %21, %22 : tensor<32x2x16x!tt.ptr<f32>, #ttg.blocked<{sizePerThread = [1, 1, 4], threadsPerWarp = [8, 1, 4], warpsPerCTA = [4, 1, 1], order = [2, 0, 1]}>>, tensor<32x2x16xi32, #ttg.blocked<{sizePerThread = [1, 1, 4], threadsPerWarp = [8, 1, 4], warpsPerCTA = [4, 1, 1], order = [2, 0, 1]}>>
     %24 = tt.load %23 : tensor<32x2x16x!tt.ptr<f32>, #ttg.blocked<{sizePerThread = [1, 1, 4], threadsPerWarp = [8, 1, 4], warpsPerCTA = [4, 1, 1], order = [2, 0, 1]}>>
-    %25 = "tt.reduce"(%24) <{axis = 1 : i32}> ({
+    %25 = tt.reduce(%24) {axis = 1 : i32} ({
 // CHECK: %[[LD_BASE:.*]] = tt.splat %arg0 : !tt.ptr<f32> -> tensor<32x2x16x!tt.ptr<f32>, #blocked>
 // CHECK: %[[LD_PTR:.*]] = tt.addptr %[[LD_BASE:.*]], %[[LD_OFST:.*]] : tensor<32x2x16x!tt.ptr<f32>, #blocked>, tensor<32x2x16xi32, #blocked>
 // CHECK: tt.load %[[LD_PTR]] : tensor<32x2x16x!tt.ptr<f32>, #blocked>
-// CHECK: "tt.reduce"
+// CHECK: tt.reduce
     ^bb0(%arg2: f32, %arg3: f32):
       %34 = arith.maxnumf %arg2, %arg3 : f32
       tt.reduce.return %34 : f32

@@ -1730,8 +1730,12 @@ void init_triton_ir(py::module &&m) {
              return self.create<math::AbsIOp>(val);
            })
       .def("create_reduce",
-           [](TritonOpBuilder &self, std::vector<Value> operands, int axis)
-               -> OpState { return self.create<ReduceOp>(operands, axis); })
+           [](TritonOpBuilder &self, std::vector<Value> operands, int axis,
+              std::optional<Value> init) -> OpState {
+             return self.create<ReduceOp>(operands, axis,
+                                          init.has_value() ? *init : Value());
+           },
+           py::arg("operands"), py::arg("axis"), py::arg("init") = std::nullopt)
       .def("create_reduce_ret",
            [](TritonOpBuilder &self, py::args args) -> OpState {
              llvm::SmallVector<Value> return_values;

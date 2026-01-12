@@ -1832,7 +1832,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
 #blocked1 = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
 module attributes {"ttg.target" = "cuda:80", "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
   tt.func public @sum_reduction(%arg0: tensor<1x1024xi32, #blocked>) {
-    %11 = "tt.reduce"(%arg0) <{axis = 1 : i32}> ({
+    %11 = "tt.reduce"(%arg0) <{axis = 1 : i32, operandSegmentSizes = array<i32: 1, 0>}> ({
     ^bb0(%arg2: i32, %arg3: i32):
       %15 = arith.addi %arg2, %arg3 : i32
       tt.reduce.return %15 : i32
@@ -1848,7 +1848,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 2 : i32} {
   // CHECK-LABEL: reduce_bools
   tt.func public @reduce_bools(%arg: tensor<256x2xi1, #blocked>) {
     // CHECK: llvm.mlir.addressof @global_smem
-    %24 = "tt.reduce"(%arg) <{axis = 1 : i32}> ({
+    %24 = "tt.reduce"(%arg) <{axis = 1 : i32, operandSegmentSizes = array<i32: 1, 0>}> ({
     ^bb0(%arg4: i1, %arg5: i1):
       %48 = arith.ori %arg4, %arg5 : i1
       tt.reduce.return %48 : i1
@@ -1906,7 +1906,7 @@ module attributes {"ttg.target" = "cuda:80", "ttg.num-ctas" = 1 : i32, "ttg.num-
 module attributes {"ttg.target" = "cuda:80", "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 16 : i32, "ttg.threads-per-warp" = 32 : i32} {
   tt.func public @reduce_slice() {
     %cst = arith.constant dense<true> : tensor<4x1xi1, #sliced2>
-    %0 = "tt.reduce"(%cst) <{axis = 1 : i32}> ({
+    %0 = "tt.reduce"(%cst) <{axis = 1 : i32, operandSegmentSizes = array<i32: 1, 0>}> ({
     ^bb0(%arg0: i1, %arg1: i1):
       %1 = arith.ori %arg0, %arg1 : i1
       tt.reduce.return %1 : i1
@@ -1927,7 +1927,7 @@ module attributes {"ttg.target" = "cuda:80", "ttg.num-ctas" = 1 : i32, "ttg.num-
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:80", "ttg.threads-per-warp" = 32 : i32} {
   tt.func public @reduce_md_slice(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}) {
     %cst = arith.constant dense<0.000000e+00> : tensor<2x128xf32, #ttg.slice<{dim = 2, parent = #blocked}>>
-    %0 = "tt.reduce"(%cst) <{axis = 1 : i32}> ({
+    %0 = "tt.reduce"(%cst) <{axis = 1 : i32, operandSegmentSizes = array<i32: 1, 0>}> ({
     ^bb0(%arg1: f32, %arg2: f32):
       %18 = arith.maxnumf %arg1, %arg2 : f32
       tt.reduce.return %18 : f32

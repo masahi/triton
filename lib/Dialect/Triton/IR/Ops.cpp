@@ -465,10 +465,34 @@ ReduceOp::inferReturnTypes(MLIRContext *context, std::optional<Location> loc,
                            SmallVectorImpl<Type> &inferredReturnTypes) {
   Properties *prop = properties.as<Properties *>();
   int axis = prop->axis.getInt();
-  for (auto arg : operands) {
-    auto argTy = cast<RankedTensorType>(arg.getType());
-    auto retEltTy = argTy.getElementType();
-    if (failed(inferReduceReturnShape(loc, argTy, retEltTy, axis,
+  
+  // Get operand segment sizes to determine which operands are srcs vs init
+  auto segmentSizes = prop->operandSegmentSizes;
+  int32_t numSrcs = 0;
+  int32_t hasInit = 0;
+  
+  if (segmentSizes.size() >= 2) {
+    numSrcs = segmentSizes[0];
+    hasInit = segmentSizes[1];
+  } else {
+    // Fallback: assume all operands are srcs if segment sizes not set
+    numSrcs = operands.size();
+    hasInit = 0;
+  }
+  
+  // Get the result element type from init if present
+  Type initType;
+  if (hasInit && operands.size() > static_cast<size_t>(numSrcs)) {
+    initType = operands[numSrcs].getType();
+  }
+  
+  // Infer return types only from src operands (not init)
+  for (int32_t i = 0; i < numSrcs && static_cast<size_t>(i) < operands.size(); ++i) {
+    auto argTy = cast<RankedTensorType>(operands[i].getType());
+    // If init is present, use init type as result element type
+    // Otherwise, use the operand's element type
+    Type resultElemTy = initType ? initType : argTy.getElementType();
+    if (failed(inferReduceReturnShape(loc, argTy, resultElemTy, axis,
                                       inferredReturnTypes))) {
       return failure();
     }
@@ -572,18 +596,129 @@ static llvm::SmallVector<Type> getElementTypesImpl(const ValueRange &operands) {
   return srcElemTys;
 }
 
-LogicalResult ReduceOp::verify() { return verifyReduceScan(*this); }
+LogicalResult ReduceOp::verify() {
+  if (getSrcs().empty()) {
+    return emitOpError() << "must have at least 1 operand";
+  }
+  if (getSrcs().size() != getNumResults()) {
+    return emitOpError() << "must have the same number of inputs as outputs";
+  }
+
+  // Check axis bounds and that all operands have the same rank
+  auto axis = getAxis();
+  int64_t firstRank = 0;
+  for (auto tensorTy : getInputTypes()) {
+    int64_t rank = tensorTy.getRank();
+    if (axis < 0 || axis >= rank)
+      return emitOpError() << "axis out of bounds for operand rank " << rank;
+    if (firstRank == 0)
+      firstRank = rank;
+    else if (rank != firstRank)
+      return emitOpError()
+             << "all operands must have the same rank, but got ranks "
+             << firstRank << " and " << rank;
+  }
+
+  // Check that all source operands have the same shape (SameOperandsShape for srcs only)
+  auto srcs = getSrcs();
+  if (srcs.size() > 1) {
+    auto firstShape = cast<RankedTensorType>(srcs[0].getType()).getShape();
+    for (size_t i = 1; i < srcs.size(); ++i) {
+      auto shape = cast<RankedTensorType>(srcs[i].getType()).getShape();
+      if (firstShape != shape) {
+        return emitOpError() << "requires the same shape for all operands";
+      }
+    }
+  }
+
+  // Check that all source operands have the same encoding (SameOperandsEncoding for srcs only)
+  if (srcs.size() > 1) {
+    auto firstEncoding = cast<RankedTensorType>(srcs[0].getType()).getEncoding();
+    for (size_t i = 1; i < srcs.size(); ++i) {
+      auto encoding = cast<RankedTensorType>(srcs[i].getType()).getEncoding();
+      if (firstEncoding != encoding) {
+        return emitOpError() << "requires the same encoding for all operands";
+      }
+    }
+  }
+
+  // If init is provided, result type must match init type
+  // Otherwise, result type must match operand element type
+  Value init = getInit();
+  for (auto [opElemTy, resTy] :
+       llvm::zip(getElementTypes(), getResultTypes())) {
+    Type expectedResultTy = init ? init.getType() : opElemTy;
+    if (expectedResultTy != getElementTypeOrSelf(resTy)) {
+      return emitOpError() << "result type " << getElementTypeOrSelf(resTy)
+                           << " does not match expected type " << expectedResultTy;
+    }
+  }
+  return success();
+}
 
 LogicalResult ReduceOp::verifyRegions() {
-  return verifyRegionsImpl<ReduceReturnOp>(*this);
+  auto argElementTypes = getElementTypes();
+  const auto numSrcs = getSrcs().size();
+  const auto numArgs = 2 * numSrcs;
+  auto &block = *getBody();
+  if (block.getNumArguments() != numArgs) {
+    return emitOpError() << "nested block must take " << numArgs
+                         << " arguments, but given block with "
+                         << block.getNumArguments() << " arguments";
+  }
+
+  Value init = getInit();
+  const auto &blockArgTypes = block.getArgumentTypes();
+  for (unsigned i = 0; i < numArgs; ++i) {
+    const auto &blockArgTy = blockArgTypes[i];
+    Type expectedTy;
+    if (i < numSrcs) {
+      // First half: accumulator type (init type if present, else operand type)
+      expectedTy = init ? init.getType() : argElementTypes[i];
+    } else {
+      // Second half: value type (operand type)
+      expectedTy = argElementTypes[i - numSrcs];
+    }
+    if (blockArgTy != expectedTy) {
+      return emitOpError()
+             << "type mismatch on combine operation. Expected argument " << i
+             << " to have type " << expectedTy << " but got " << blockArgTy;
+    }
+  }
+
+  auto terminator = dyn_cast<ReduceReturnOp>(block.getTerminator());
+  if (!terminator) {
+    return emitOpError()
+           << "combine operation must be terminated "
+           << "with a ReduceReturnOp but got " << block.getTerminator();
+  }
+  const auto &combineResults = terminator->getOperands();
+  if (combineResults.size() != numSrcs) {
+    return emitOpError()
+           << "expected combine operation to return " << numSrcs
+           << " values but got " << combineResults.size();
+  }
+  // Return type must match accumulator type
+  // For multi-operand reduce, each return value should match its corresponding accumulator type
+  for (unsigned i = 0; i < combineResults.size(); ++i) {
+    const auto &resultTy = combineResults[i].getType();
+    // Accumulator type: init type if present, otherwise the i-th operand's element type
+    Type expectedReturnTy = init ? init.getType() : argElementTypes[i];
+    if (resultTy != expectedReturnTy) {
+      return emitOpError()
+             << "type mismatch on combine operation return. Expected type "
+             << expectedReturnTy << " but got " << resultTy;
+    }
+  }
+  return success();
 }
 
 llvm::SmallVector<RankedTensorType> ReduceOp::getInputTypes() {
-  return getInputTypesImpl(this->getOperands());
+  return getInputTypesImpl(this->getSrcs());
 }
 
 llvm::SmallVector<Type> ReduceOp::getElementTypes() {
-  return getElementTypesImpl(this->getOperands());
+  return getElementTypesImpl(this->getSrcs());
 }
 
 ::mlir::Operation *ReduceOp::getSingleCombiner() {
@@ -602,7 +737,140 @@ llvm::SmallVector<Type> ReduceOp::getElementTypes() {
   return reduceOp;
 }
 
-unsigned ReduceOp::getNumOperands() { return this->getOperands().size(); }
+unsigned ReduceOp::getNumOperands() { return this->getSrcs().size(); }
+
+void ReduceOp::build(OpBuilder &builder, OperationState &state,
+                     ValueRange srcs, int axis) {
+  // Builder without init value
+  SmallVector<Type> inferredReturnTypes;
+  for (auto arg : srcs) {
+    auto argTy = cast<RankedTensorType>(arg.getType());
+    // Must use inferReduceReturnShape to correctly compute the reduced type
+    (void)inferReduceReturnShape(std::nullopt, argTy, argTy.getElementType(), axis,
+                                 inferredReturnTypes);
+  }
+  state.addOperands(srcs);
+  state.addAttribute("axis", builder.getI32IntegerAttr(axis));
+  state.addAttribute("operandSegmentSizes",
+                     builder.getDenseI32ArrayAttr({static_cast<int32_t>(srcs.size()), 0}));
+  state.addTypes(inferredReturnTypes);
+  state.addRegion();
+}
+
+void ReduceOp::build(OpBuilder &builder, OperationState &state,
+                     ValueRange srcs, int axis, Value init) {
+  // Builder with init value
+  SmallVector<Type> inferredReturnTypes;
+  Type resultElemTy = init ? init.getType()
+                           : cast<RankedTensorType>(srcs[0].getType()).getElementType();
+  for (auto arg : srcs) {
+    auto argTy = cast<RankedTensorType>(arg.getType());
+    // Must use inferReduceReturnShape to correctly compute the reduced type
+    (void)inferReduceReturnShape(std::nullopt, argTy, resultElemTy, axis,
+                                 inferredReturnTypes);
+  }
+  state.addOperands(srcs);
+  if (init)
+    state.addOperands(init);
+  state.addAttribute("axis", builder.getI32IntegerAttr(axis));
+  state.addAttribute("operandSegmentSizes",
+                     builder.getDenseI32ArrayAttr({static_cast<int32_t>(srcs.size()),
+                                                   init ? 1 : 0}));
+  state.addTypes(inferredReturnTypes);
+  state.addRegion();
+}
+
+// Custom parser for ReduceOp to handle optional init operand
+// Syntax: "tt.reduce" "(" $srcs ("," $init^)? ")" attr-dict $combineOp ":" functional-type
+ParseResult ReduceOp::parse(OpAsmParser &parser, OperationState &result) {
+  SmallVector<OpAsmParser::UnresolvedOperand> operands;
+  SmallVector<Type> operandTypes;
+  
+  // Parse operand list: (srcs [, init])
+  if (parser.parseLParen())
+    return failure();
+  
+  if (parser.parseOperandList(operands) || parser.parseRParen())
+    return failure();
+  
+  // Parse attributes: {axis = N : i32}
+  if (parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+  
+  // Parse the region - handle both `{...}` and `({...})` syntax
+  bool hasParenAroundRegion = succeeded(parser.parseOptionalLParen());
+  Region *combineOp = result.addRegion();
+  if (parser.parseRegion(*combineOp))
+    return failure();
+  if (hasParenAroundRegion && parser.parseRParen())
+    return failure();
+  
+  // Parse functional type: (input_types) -> (result_types)
+  FunctionType funcType;
+  if (parser.parseColonType(funcType))
+    return failure();
+  
+  operandTypes = llvm::to_vector(funcType.getInputs());
+  result.addTypes(funcType.getResults());
+  
+  // Resolve operands
+  if (parser.resolveOperands(operands, operandTypes, parser.getNameLoc(), result.operands))
+    return failure();
+  
+  // Determine operand segment sizes:
+  // If the number of operands matches the number of input types, assume no init
+  // If there's one extra operand with scalar type at the end, it's the init
+  size_t numInputTypes = funcType.getInputs().size();
+  size_t numOperands = operands.size();
+  
+  int32_t numSrcs, numInit;
+  if (numOperands == numInputTypes) {
+    // Check if last operand could be init (scalar type while others are tensors)
+    bool lastIsScalar = numOperands > 0 && !isa<RankedTensorType>(operandTypes.back());
+    bool othersAreTensors = true;
+    for (size_t i = 0; i + 1 < numOperands; ++i) {
+      if (!isa<RankedTensorType>(operandTypes[i])) {
+        othersAreTensors = false;
+        break;
+      }
+    }
+    
+    if (lastIsScalar && othersAreTensors && numOperands > 1) {
+      // Last operand is init
+      numSrcs = numOperands - 1;
+      numInit = 1;
+    } else {
+      // All operands are srcs
+      numSrcs = numOperands;
+      numInit = 0;
+    }
+  } else {
+    // Fallback: all operands are srcs
+    numSrcs = numOperands;
+    numInit = 0;
+  }
+  
+  result.addAttribute("operandSegmentSizes", 
+                      parser.getBuilder().getDenseI32ArrayAttr({numSrcs, numInit}));
+  
+  return success();
+}
+
+// Custom printer for ReduceOp
+void ReduceOp::print(OpAsmPrinter &printer) {
+  printer << "(";
+  printer.printOperands(getSrcs());
+  if (getInit()) {
+    printer << ", ";
+    printer.printOperand(getInit());
+  }
+  printer << ") ";
+  printer.printOptionalAttrDict((*this)->getAttrs(), {"operandSegmentSizes"});
+  printer << " ";
+  printer.printRegion(getCombineOp());
+  printer << " : ";
+  printer.printFunctionalType(getOperation());
+}
 
 //-- ScanOp --
 void ScanOp::build(OpBuilder &builder, OperationState &state,

@@ -1499,7 +1499,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
       %162 = tt.broadcast %161 : tensor<128x1xi32, #mma> -> tensor<128x64xi32, #mma>
       %170 = arith.sitofp %162 : tensor<128x64xi32, #mma> to tensor<128x64xf32, #mma>
 
-      %173 = "tt.reduce"(%170) <{axis = 1 : i32}> ({
+      %173 = tt.reduce(%170) {axis = 1 : i32} ({
       ^bb0(%arg33: f32, %arg34: f32):
         %207 = arith.maxnumf %arg33, %arg34 : f32
         tt.reduce.return %207 : f32

@@ -215,7 +215,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
         %50 = ttng.warp_group_dot %47, %49, %arg14 {async_task_id = array<i32: 1>, inputPrecision = 0 : i32} : !ttg.memdesc<128x64xf16, #shared, #ttg.shared_memory> * !ttg.memdesc<64x256xf16, #shared, #ttg.shared_memory> -> tensor<128x256xf32, #mma>
         scf.yield {async_task_id = array<i32: 0, 1, 2>} %50 : tensor<128x256xf32, #mma>
       } {async_task_id = array<i32: 0, 1, 2>}
-      %13 = "tt.reduce"(%12) <{axis = 1 : i32}> ({
+      %13 = "tt.reduce"(%12) <{axis = 1 : i32, operandSegmentSizes = array<i32: 1, 0>}> ({
       ^bb0(%arg13: f32, %arg14: f32):
         %45 = arith.addf %arg13, %arg14 {async_task_id = array<i32: 2>} : f32
         tt.reduce.return %45 {async_task_id = array<i32: 2>} : f32
@@ -225,7 +225,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
       %16 = tt.broadcast %15 {async_task_id = array<i32: 2>} : tensor<128x1xf32, #mma> -> tensor<128x256xf32, #mma>
       %17 = arith.subf %12, %16 {async_task_id = array<i32: 2>} : tensor<128x256xf32, #mma>
       %18 = arith.mulf %17, %17 {async_task_id = array<i32: 2>} : tensor<128x256xf32, #mma>
-      %19 = "tt.reduce"(%18) <{axis = 1 : i32}> ({
+      %19 = "tt.reduce"(%18) <{axis = 1 : i32, operandSegmentSizes = array<i32: 1, 0>}> ({
       ^bb0(%arg13: f32, %arg14: f32):
         %45 = arith.addf %arg13, %arg14 {async_task_id = array<i32: 2>} : f32
         tt.reduce.return %45 {async_task_id = array<i32: 2>} : f32

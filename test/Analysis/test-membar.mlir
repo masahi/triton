@@ -96,11 +96,11 @@ tt.func @scratch(%arg: tensor<16x16xf16, #AL>) {
   // CHECK: ttg.local_barrier
   // CHECK: tt.reduce
   %1 = ttg.local_load %cst0 : !ttg.memdesc<16x16xf16, #A_SHARED, #ttg.shared_memory> -> tensor<16x16xf16, #AL>
-  %2 = "tt.reduce" (%1) ({
+  %2 = tt.reduce(%1) {axis = 0 : i32} ({
   ^bb0(%arg1: f16, %arg2: f16):
     %add = arith.addf %arg1, %arg2 : f16
     tt.reduce.return %add : f16
-  }) {axis = 0 : i32} : (tensor<16x16xf16, #AL>) -> tensor<16xf16, #sliceAd0>
+  }) : (tensor<16x16xf16, #AL>) -> tensor<16xf16, #sliceAd0>
   tt.return
 }
 

@@ -23,7 +23,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.thr
     // CHECK: rocdl.permlanex16
     // CHECK: llvm.intr.maxnum
     // CHECK: rocdl.readlane
-    %0 = "tt.reduce"(%arg0) <{axis = 0 : i32}> ({
+    %0 = tt.reduce(%arg0) {axis = 0 : i32} ({
     ^bb0(%arg1: f32, %arg2: f32):
       %1 = arith.maxnumf %arg1, %arg2 : f32
       tt.reduce.return %1 : f32
@@ -51,11 +51,11 @@ tt.func private @reduce_linear_layout(%arg0: tensor<32x2xi32, #linear>) -> tenso
   // CHECK: [[result1:%.*]] = llvm.insertvalue [[sum0]], [[result0]][0]
   // CHECK: [[result2:%.*]] = llvm.insertvalue [[sum1]], [[result1]][1]
 
-  %0 = "tt.reduce"(%arg0) ({
+  %0 = tt.reduce(%arg0) {axis = 1 : i32} ({
   ^bb0(%arg1: i32, %arg2: i32):
     %1 = arith.addi %arg1, %arg2 : i32
     tt.reduce.return %1 : i32
-  }) {axis = 1 : i32} : (tensor<32x2xi32, #linear>) -> tensor<32xi32, #ttg.slice<{dim = 1, parent = #linear}>>
+  }) : (tensor<32x2xi32, #linear>) -> tensor<32xi32, #ttg.slice<{dim = 1, parent = #linear}>>
 
   // CHECK: llvm.return [[result2]]
   tt.return %0 : tensor<32xi32, #ttg.slice<{dim = 1, parent = #linear}>>

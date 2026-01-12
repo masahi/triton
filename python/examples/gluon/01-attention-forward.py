@@ -652,7 +652,16 @@ def _softmax_inner_loop(tile_id: gl.constexpr, config, prog,  #
         if config.use_exp2_turnstile:
             mbarrier.arrive(exp_bar, count=1)
 
+<<<<<<< Updated upstream
         l_ij = float2.pack2(*_split_n(p)).sum(axis=1)
+=======
+        if use_rubin_qk_fp16:
+            # TODO
+            l_ij = p.sum_f32(axis=1)
+        else:
+            l_ij = float2.pack2(*_split_n(p)).sum(axis=1)
+
+>>>>>>> Stashed changes
         l_ij = Float2Tensor(gl.convert_layout(l_ij.value, l_i.value.type.layout, assert_trivial=True))
         alpha = gl.convert_layout(alpha, l_i.value.type.layout, assert_trivial=True)
         l_i = float2.fma(l_i, float2.pack2(alpha, alpha), l_ij)

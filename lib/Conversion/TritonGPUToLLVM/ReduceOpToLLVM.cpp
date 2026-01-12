@@ -34,8 +34,12 @@ public:
     auto srcValues = unpackInputs(loc, op, adaptor, rewriter);
     std::map<SmallVector<unsigned>, SmallVector<Value>> accs;
     std::map<SmallVector<unsigned>, SmallVector<Value>> indices;
+
+    // Get the initial value if provided
+    Value initValue = adaptor.getInit();
+
     // First reduce all the values along axis within each thread.
-    reduceWithinThreads(helper, srcValues, accs, indices, rewriter);
+    reduceWithinThreads(helper, srcValues, accs, indices, rewriter, initValue);
 
     // Then reduce across threads within a warp.
     reduceWithinWarps(helper, accs, rewriter);
@@ -95,11 +99,11 @@ private:
   unpackInputs(Location loc, triton::ReduceOp op, OpAdaptor adaptor,
                ConversionPatternRewriter &rewriter) const {
     auto types = op.getInputTypes();
-    auto operands = adaptor.getOperands();
+    auto srcs = adaptor.getSrcs();
     unsigned srcElems = getTotalElemsPerThread(types[0]);
     SmallVector<SmallVector<Value>> srcValues(srcElems);
     for (unsigned i = 0; i < op.getNumOperands(); ++i) {
-      auto values = unpackLLElements(loc, operands[i], rewriter);
+      auto values = unpackLLElements(loc, srcs[i], rewriter);
 
       assert(values.size() == srcValues.size());
       for (unsigned j = 0; j < srcValues.size(); ++j) {
@@ -121,7 +125,7 @@ private:
       ReduceOpHelper &helper, SmallVector<SmallVector<Value>> &srcValues,
       std::map<SmallVector<unsigned>, SmallVector<Value>> &accs,
       std::map<SmallVector<unsigned>, SmallVector<Value>> &indices,
-      ConversionPatternRewriter &rewriter) const {
+      ConversionPatternRewriter &rewriter, Value initValue) const {
     triton::ReduceOp op = helper.getOperation();
     RankedTensorType operandType = op.getInputTypes()[0];
     // Assumes offsets don't actually depend on type
@@ -144,6 +148,12 @@ private:
       SmallVector<unsigned> key = offsets[i];
       key[op.getAxis()] = 0;
       bool isFirst = accs.find(key) == accs.end();
+      // If initial value is provided and this is the first element for this key,
+      // initialize the accumulator with it. The combine function will handle
+      // potentially different types (acc: InitType, val: SrcType).
+      if (isFirst && initValue) {
+        accs[key].push_back(initValue);
+      }
       accumulate(op.getLoc(), rewriter, *combineOp, accs[key], srcValues[i]);
       if (isFirst)
         indices[key] = srcIndices[i];
