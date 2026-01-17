@@ -44,6 +44,25 @@ inline SmallVector<Value> applyCombineOp(Location loc,
                                          ValueRange cur, Value pred = {}) {
   // Allows for passing an uninitialized acc and use cur as the neutral element
   if (acc.size() == 0) {
+    // Check if this is a mixed-precision reduction by examining the combine region signature
+    Block &combineBlock = combineOp.front();
+    if (combineBlock.getNumArguments() == 2 * cur.size()) {
+      // Mixed-precision: first N args (acc) have different type than second N args (cur)
+      SmallVector<Value> convertedCur;
+      convertedCur.reserve(cur.size());
+      for (unsigned i = 0; i < cur.size(); ++i) {
+        Type accType = combineBlock.getArgument(i).getType();
+        Type curType = cur[i].getType();
+        if (accType != curType) {
+          // Convert cur to accumulator type
+          auto fpextOp = LLVM::FPExtOp::create(rewriter, loc, accType, cur[i]);
+          convertedCur.push_back(fpextOp.getResult());
+        } else {
+          convertedCur.push_back(cur[i]);
+        }
+      }
+      return convertedCur;
+    }
     return cur;
   }
   assert(cur.size() == acc.size());

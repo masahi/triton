@@ -1702,7 +1702,15 @@ class TritonSemantic(Generic[TensorTy]):
             res_ty = scalar_ty
         return self.tensor(x, res_ty)
 
-    def reduction(self, inputs: Sequence[TensorTy], axis: int, region_builder_fn) -> Tuple[TensorTy, ...]:
+    def reduction(self, inputs: Sequence[TensorTy], axis: int, region_builder_fn, acc_dtype=None) -> Tuple[TensorTy, ...]:
+        """
+        Perform reduction over the specified axis.
+
+        :param inputs: Input tensors to reduce
+        :param axis: Axis along which to reduce
+        :param region_builder_fn: Function to build the combine region
+        :param acc_dtype: Optional accumulator dtype for mixed-precision reduction
+        """
         if axis is None:
             inputs = tuple(self.reshape(t, [t.numel.value], can_reorder=True) for t in inputs)
             axis = 0
@@ -1713,12 +1721,19 @@ class TritonSemantic(Generic[TensorTy]):
         ret_shape = [s for i, s in enumerate(shape) if i != axis]
         assert all(t.type.shape == shape for t in inputs), "all reduction inputs must have the same shape"
 
-        reduce_op = self.builder.create_reduce([t.handle for t in inputs], axis)
+        # Create reduce op with optional accumulator type
+        if acc_dtype is None:
+            reduce_op = self.builder.create_reduce([t.handle for t in inputs], axis)
+            ret_scalar_types = [inp.type.scalar for inp in inputs]
+        else:
+            reduce_op = self.builder.create_reduce([t.handle for t in inputs], axis, acc_dtype.to_ir(self.builder))
+            ret_scalar_types = [acc_dtype] * len(inputs)
+
         region_builder_fn(reduce_op)
         assert reduce_op.verify()
 
         return tuple(
-            self.wrap_tensor(reduce_op.get_result(i), inputs[i].type.scalar, ret_shape) for i in range(len(inputs)))
+            self.wrap_tensor(reduce_op.get_result(i), ret_scalar_types[i], ret_shape) for i in range(len(inputs)))
 
 # ===----------------------------------------------------------------------===
 #                               Associative Scan

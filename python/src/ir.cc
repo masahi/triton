@@ -1731,7 +1731,14 @@ void init_triton_ir(py::module &&m) {
            })
       .def("create_reduce",
            [](TritonOpBuilder &self, std::vector<Value> operands, int axis)
-               -> OpState { return self.create<ReduceOp>(operands, axis); })
+               -> OpState {
+             return self.create<ReduceOp>(operands, axis);
+           })
+      .def("create_reduce",
+           [](TritonOpBuilder &self, std::vector<Value> operands, int axis,
+              Type accType) -> OpState {
+             return self.create<ReduceOp>(operands, axis, TypeAttr::get(accType));
+           })
       .def("create_reduce_ret",
            [](TritonOpBuilder &self, py::args args) -> OpState {
              llvm::SmallVector<Value> return_values;

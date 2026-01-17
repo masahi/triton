@@ -68,3 +68,29 @@ tt.func @anchor(%ptr: !llvm.ptr, %arg0: tensor<32x16xi32, #linear>) {
 }
 
 }
+
+// Test mixed-precision reduction: FP16 input -> FP32 output with FP32 accumulator
+// CHECK-LABEL: @reduce_fp16_to_fp32_mixed_precision
+tt.func private @reduce_fp16_to_fp32_mixed_precision(%arg0: tensor<32x16xf16, #linear>) -> tensor<16xf32, #ttg.slice<{dim = 0, parent = #linear}>> {
+  // The first FP16 value should be extended to FP32 for the accumulator
+  // CHECK: fpext half {{.*}} to float
+  
+  // Then all subsequent additions should be in FP32
+  // CHECK: fadd float
+  
+  %0 = "tt.reduce"(%arg0) ({
+  ^bb0(%acc: f32, %cur: f16):
+    %ext = arith.extf %cur : f16 to f32
+    %sum = arith.addf %acc, %ext : f32
+    tt.reduce.return %sum : f32
+  }) {axis = 0 : i32, accType = f32} : (tensor<32x16xf16, #linear>) -> tensor<16xf32, #ttg.slice<{dim = 0, parent = #linear}>>
+
+  tt.return %0 : tensor<16xf32, #ttg.slice<{dim = 0, parent = #linear}>>
+}
+
+tt.func @anchor_mixed_precision(%ptr: !llvm.ptr, %arg0: tensor<32x16xf16, #linear>) {
+  %0 = tt.call @reduce_fp16_to_fp32_mixed_precision(%arg0) : (tensor<32x16xf16, #linear>) -> tensor<16xf32, #ttg.slice<{dim = 0, parent = #linear}>>
+  %1 = builtin.unrealized_conversion_cast %0 : tensor<16xf32, #ttg.slice<{dim = 0, parent = #linear}>> to !llvm.struct<(float, float)>
+  llvm.store volatile %1, %ptr : !llvm.struct<(float, float)>, !llvm.ptr
+  tt.return
+}

@@ -745,9 +745,13 @@ def TT_ReduceOp: TT_Op<"reduce",
                         SingleBlock,
                         DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
     let summary = "Reduction using generic combination algorithm";
-    let arguments = (ins Variadic<TT_Tensor>:$srcs, I32Attr:$axis);
+    let arguments = (ins Variadic<TT_Tensor>:$srcs, I32Attr:$axis, OptionalAttr<TypeAttr>:$accType);
     let results = (outs Variadic<TT_Type>:$result);
     let regions = (region SizedRegion<1>:$combineOp);
+    let builders = [
+        OpBuilder<(ins "ValueRange":$srcs, "int":$axis)>,
+        OpBuilder<(ins "ValueRange":$srcs, "int":$axis, "TypeAttr":$accType)>,
+    ];
     let hasVerifier = 1;
     let hasRegionVerifier = 1;
     let extraClassDeclaration = [{

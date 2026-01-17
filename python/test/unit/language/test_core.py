@@ -2560,6 +2560,26 @@ def test_sum_dtype(device):
     torch.testing.assert_close(out[0], torch.tensor(32 * 32, dtype=torch.bfloat16, device=device))
 
 
+def test_sum_mixed_precision_fp16_to_fp32(device):
+    """Test mixed-precision reduction: FP16 input with FP32 accumulator/output."""
+
+    @triton.jit
+    def kernel_mixed_precision(x_ptr, out_ptr, N: tl.constexpr):
+        x = tl.load(x_ptr + tl.arange(0, N))  # FP16
+        result = tl.sum(x, dtype=tl.float32)  # Should use mixed-precision
+        tl.store(out_ptr, result)
+
+    N = 1024
+    x = torch.randn(N, device=device, dtype=torch.float16)
+    out = torch.zeros(1, device=device, dtype=torch.float32)
+
+    kernel_mixed_precision[(1, )](x, out, N=N)
+
+    # Compare with reference (upcast to FP32 then sum)
+    expected = x.to(torch.float32).sum()
+    torch.testing.assert_close(out[0], expected, rtol=1e-3, atol=1e-4)
+
+
 # trivial associative but not commutative function
 @triton.jit
 def get_first_element(a, b):

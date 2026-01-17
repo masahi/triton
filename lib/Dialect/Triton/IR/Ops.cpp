@@ -465,9 +465,19 @@ ReduceOp::inferReturnTypes(MLIRContext *context, std::optional<Location> loc,
                            SmallVectorImpl<Type> &inferredReturnTypes) {
   Properties *prop = properties.as<Properties *>();
   int axis = prop->axis.getInt();
+
+  // Extract optional accType attribute
+  Type accType;
+  if (attributes) {
+    if (auto accTypeAttr = attributes.getAs<TypeAttr>("accType")) {
+      accType = accTypeAttr.getValue();
+    }
+  }
+
   for (auto arg : operands) {
     auto argTy = cast<RankedTensorType>(arg.getType());
-    auto retEltTy = argTy.getElementType();
+    // Use accType if specified, otherwise input element type
+    auto retEltTy = accType ? accType : argTy.getElementType();
     if (failed(inferReduceReturnShape(loc, argTy, retEltTy, axis,
                                       inferredReturnTypes))) {
       return failure();
@@ -477,6 +487,22 @@ ReduceOp::inferReturnTypes(MLIRContext *context, std::optional<Location> loc,
 }
 
 // Helpers for Reductions and Scans
+
+// Helper to validate mixed-precision reduction type combinations
+static bool isValidMixedPrecisionReduction(Type inputTy, Type accTy) {
+  // For now, only support FP16 -> FP32
+  if (inputTy.isF16() && accTy.isF32()) {
+    return true;
+  }
+
+  // Future expansion:
+  // if (inputTy.isBF16() && accTy.isF32()) return true;
+  // if (inputTy.isFloat8E4M3FN() && accTy.isF32()) return true;
+  // etc.
+
+  return false;
+}
+
 template <class Op> LogicalResult verifyReduceScan(Op &op) {
   if (op.getOperands().empty()) {
     return op.emitOpError() << "must have at least 1 operand";
@@ -497,10 +523,37 @@ template <class Op> LogicalResult verifyReduceScan(Op &op) {
              << "all operands must have the same rank, but got ranks "
              << firstRank << " and " << rank;
   }
+  // Type validation - handle both regular and mixed-precision reduction
+  Type accType;
+  if constexpr (std::is_same_v<Op, ReduceOp>) {
+    // Check for accType attribute (supports both properties and discardable attributes)
+    Operation *operation = op.getOperation();
+    if (auto accTypeAttr = operation->getAttrOfType<TypeAttr>("accType")) {
+      accType = accTypeAttr.getValue();
+    }
+  }
+
   for (auto [opElemTy, resTy] :
        llvm::zip(op.getElementTypes(), op.getResultTypes())) {
-    if (opElemTy != getElementTypeOrSelf(resTy)) {
-      return op.emitOpError() << "operand types and result types must agree";
+    auto resultElemTy = getElementTypeOrSelf(resTy);
+
+    if (accType) {
+      // Mixed-precision mode: validate widening
+      if (accType != resultElemTy) {
+        return op.emitOpError()
+               << "accumulator type must match result type, but got accumulator type "
+               << accType << " and result type " << resultElemTy;
+      }
+      if (!isValidMixedPrecisionReduction(opElemTy, resultElemTy)) {
+        return op.emitOpError()
+               << "unsupported mixed-precision reduction from " << opElemTy
+               << " to " << resultElemTy;
+      }
+    } else {
+      // Original constraint: types must match
+      if (opElemTy != resultElemTy) {
+        return op.emitOpError() << "operand types and result types must agree";
+      }
     }
   }
   return success();
@@ -510,45 +563,75 @@ template <class ReturnOp, class Op>
 static LogicalResult verifyRegionsImpl(Op &op) {
   auto argElementTypes = op.getElementTypes();
   const auto &operands = op.getOperands();
-  const auto numArgs = 2 * operands.size();
   auto &block = *op.getBody();
-  if (block.getNumArguments() != numArgs) {
-    return op.emitOpError() << "nested block must take " << numArgs
-                            << " arguments, but given block with "
-                            << block.getNumArguments() << " arguments";
-  }
-  const auto &blockArgTypes = block.getArgumentTypes();
-  for (unsigned i = 0; i < numArgs; ++i) {
-    const auto &blockArgTy = blockArgTypes[i];
-    const auto &argElemTy = argElementTypes[i % operands.size()];
-    if (blockArgTy != argElemTy) {
-      return op.emitOpError()
-             << "type mismatch on combine operation. Expected argument " << i
-             << " to have type " << argElemTy << " but got " << blockArgTy;
+
+  // Build expected argument types based on accType (for mixed-precision)
+  SmallVector<Type> expectedArgTypes;
+  Type accType;
+  if constexpr (std::is_same_v<Op, ReduceOp>) {
+    // Check for accType attribute (supports both properties and discardable attributes)
+    Operation *operation = op.getOperation();
+    if (auto accTypeAttr = operation->getAttrOfType<TypeAttr>("accType")) {
+      accType = accTypeAttr.getValue();
     }
   }
 
+  if (accType) {
+    // Mixed-precision: (accType x N, inputType x N)
+    for (unsigned i = 0; i < operands.size(); ++i)
+      expectedArgTypes.push_back(accType); // Accumulator args
+    for (unsigned i = 0; i < operands.size(); ++i)
+      expectedArgTypes.push_back(argElementTypes[i]); // Current value args
+  } else {
+    // Original: (inputType x N, inputType x N)
+    for (unsigned i = 0; i < 2 * operands.size(); ++i)
+      expectedArgTypes.push_back(argElementTypes[i % operands.size()]);
+  }
+
+  // Verify block arguments
+  if (block.getNumArguments() != expectedArgTypes.size()) {
+    return op.emitOpError() << "nested block must take "
+                            << expectedArgTypes.size()
+                            << " arguments, but given block with "
+                            << block.getNumArguments() << " arguments";
+  }
+
+  const auto &blockArgTypes = block.getArgumentTypes();
+  for (unsigned i = 0; i < expectedArgTypes.size(); ++i) {
+    if (blockArgTypes[i] != expectedArgTypes[i]) {
+      return op.emitOpError()
+             << "type mismatch on combine operation argument " << i
+             << ". Expected " << expectedArgTypes[i] << " but got "
+             << blockArgTypes[i];
+    }
+  }
+
+  // Verify terminator
   auto terminator = dyn_cast<ReturnOp>(block.getTerminator());
   if (!terminator) {
     return op.emitOpError()
            << "combine operation must be terminated "
            << "with a ReduceReturnOp but got " << block.getTerminator();
   }
+
+  // Verify return types match accumulator type (or input type if no accType)
   const auto &combineResults = terminator->getOperands();
   if (combineResults.size() != operands.size()) {
     return op.emitOpError()
            << "expected combine operation to return " << operands.size()
            << " values but got " << combineResults.size();
   }
+
   for (unsigned i = 0; i < combineResults.size(); ++i) {
-    const auto &resultTy = combineResults[i].getType();
-    const auto &argElemTy = argElementTypes[i];
-    if (resultTy != argElemTy) {
+    Type expectedRetTy = accType ? accType : argElementTypes[i];
+    Type actualRetTy = combineResults[i].getType();
+    if (actualRetTy != expectedRetTy) {
       return op.emitOpError()
-             << "type mismatch on combine operation. Expected argument " << i
-             << " to have type " << argElemTy << " but got " << resultTy;
+             << "return type mismatch. Expected " << expectedRetTy
+             << " but got " << actualRetTy;
     }
   }
+
   return success();
 }
 

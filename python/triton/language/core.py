@@ -2635,7 +2635,7 @@ def _insertion_guard(builder):
 
 @_tensor_member_fn
 @builtin
-def reduce(input, axis, combine_fn, keep_dims=False, _semantic=None, _generator=None):
+def reduce(input, axis, combine_fn, keep_dims=False, acc_dtype=None, _semantic=None, _generator=None):
     """Applies the combine_fn to all elements in :code:`input` tensors along the provided :code:`axis`
 
     :param input: the input tensor, or tuple of tensors
@@ -2646,13 +2646,26 @@ def reduce(input, axis, combine_fn, keep_dims=False, _semantic=None, _generator=
     :type combine_fn: Callable
     :param keep_dims: if true, keep the reduced dimensions with length 1
     :type keep_dims: bool
+    :param acc_dtype: Optional accumulator dtype for mixed-precision reduction.
+                      When specified, the combine function receives (acc_dtype, input_dtype)
+                      arguments instead of (input_dtype, input_dtype).
+    :type acc_dtype: dtype | None
 
     """
     if isinstance(input, tensor):
-        return reduce((input, ), axis, combine_fn, keep_dims=keep_dims, _semantic=_semantic, _generator=_generator)[0]
+        return reduce((input, ), axis, combine_fn, keep_dims=keep_dims,
+                      acc_dtype=acc_dtype, _semantic=_semantic,
+                      _generator=_generator)[0]
 
     def make_combine_region(reduce_op):
-        param_types = [t.type.scalar for t in input] * 2
+        # Build parameter types based on acc_dtype
+        if acc_dtype is not None:
+            # Mixed-precision: (acc_dtype x N, input_dtype x N)
+            param_types = [acc_dtype] * len(input) + [t.type.scalar for t in input]
+        else:
+            # Original: (input_dtype x 2N)
+            param_types = [t.type.scalar for t in input] * 2
+
         region = reduce_op.get_region(0)
         builder = _semantic.builder
         with _insertion_guard(builder):
@@ -2675,7 +2688,7 @@ def reduce(input, axis, combine_fn, keep_dims=False, _semantic=None, _generator=
     keep_dims = _unwrap_if_constexpr(keep_dims)
     if axis is not None:
         axis = _wrap_axis(axis, len(input[0].shape))
-    ret = _semantic.reduction(input, axis, make_combine_region)
+    ret = _semantic.reduction(input, axis, make_combine_region, acc_dtype=acc_dtype)
     if keep_dims:
         if axis is not None:
             ret = tuple(expand_dims(t, axis, _semantic=_semantic) for t in ret)

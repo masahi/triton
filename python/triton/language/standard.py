@@ -281,16 +281,35 @@ def _pick_sum_dtype(in_dtype, dtype):
     return out_dtype
 
 
+@constexpr_function
+def _should_use_mixed_precision(in_dtype, out_dtype):
+    """Determine if mixed-precision reduction should be used."""
+    # FP16 -> FP32: Use mixed precision for better accuracy
+    if in_dtype == core.float16 and out_dtype == core.float32:
+        return True
+    # Future: BF16->FP32, FP8->FP32, INT8->INT32
+    return False
+
+
 @core._tensor_member_fn
 @jit
 @core._add_reduction_docstr("sum", dtype_arg="dtype")
 def sum(input, axis=None, keep_dims=False, dtype: core.constexpr = None):
-    # Pick a default dtype for the reduction if one was not specified.
+    """Sum reduction with optional output dtype."""
     out_dtype: core.constexpr = _pick_sum_dtype(input.dtype, dtype)
 
     if out_dtype is not None:
-        input = input.to(out_dtype)
-    return core.reduce(input, axis, _sum_combine, keep_dims=keep_dims)
+        # Check if mixed-precision reduction is beneficial
+        if _should_use_mixed_precision(input.dtype, out_dtype):
+            # Use mixed-precision reduction (don't convert input upfront)
+            return core.reduce(input, axis, _sum_combine, keep_dims=keep_dims,
+                               acc_dtype=out_dtype)
+        else:
+            # Convert input upfront, then reduce (existing behavior)
+            input = input.to(out_dtype)
+            return core.reduce(input, axis, _sum_combine, keep_dims=keep_dims)
+    else:
+        return core.reduce(input, axis, _sum_combine, keep_dims=keep_dims)
 
 
 @jit
