@@ -1,6 +1,7 @@
 import triton
 import triton.language as tl
 from triton_kernels.target_info import cuda_capability_geq
+from triton.language.target_features import has_feature, TargetFeature
 
 # fmt: off
 
@@ -73,8 +74,9 @@ def _compute_quant_and_scale(src_tensor, valid_src_mask, mx_tensor_dtype: tl.con
     # Now we must convert the tensors to the mx format.
     if is_fp8:
         out_tensor = quant_tensor.to(mx_tensor_dtype)
-    elif cuda_capability_geq(10, 0):
+    elif has_feature(TargetFeature.PTX_CVT_E2M1):
         # Convert scaled values to two f32 lanes and use PTX cvt to e2m1x2 with two f32 operands.
+        # Note: PTX cvt.e2m1 is only available on sm100-sm119 (NOT sm120).
         pairs = tl.reshape(quant_tensor, [BLOCK_SIZE_OUT_DIM, BLOCK_SIZE_QUANT_DIM // 2, 2])
         lo_f, hi_f = tl.split(pairs)
         lo_f32 = lo_f.to(tl.float32)

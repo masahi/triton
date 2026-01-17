@@ -3,18 +3,25 @@
 
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
 #include "triton/Conversion/TritonGPUToLLVM/TargetInfoBase.h"
+#include "triton/Target/TargetArchitecture.h"
 #include "llvm/TargetParser/TargetParser.h"
 #include <string>
 
 namespace mlir::triton::AMD {
 class TargetInfo : public mlir::triton::TargetInfoBase {
 public:
-  explicit TargetInfo(std::string arch) : arch(std::move(arch)) {}
+  explicit TargetInfo(std::string arch)
+      : arch(std::move(arch)),
+        archObj_(mlir::triton::TargetArchitecture::fromAMD(this->arch)),
+        features_(archObj_.getFeatures()) {}
 
   llvm::AMDGPU::IsaVersion getIsaVersion() const;
 
   StringRef getArch() const { return arch; }
   ISAFamily getISAFamily() const { return deduceISAFamily(arch); }
+
+  // NEW: Feature query API implementation
+  const TargetFeatureSet& getFeatures() const override { return features_; }
 
   llvm::AMDGPU::GPUKind getGPUKind() const;
 
@@ -116,6 +123,8 @@ private:
                   bool useStdErr) const;
 
   std::string arch;
+  mlir::triton::TargetArchitecture archObj_;  // NEW: Architecture representation
+  mlir::triton::TargetFeatureSet features_;   // NEW: Feature set for this target
 };
 } // namespace mlir::triton::AMD
 

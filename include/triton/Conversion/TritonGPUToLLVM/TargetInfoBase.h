@@ -2,11 +2,27 @@
 #define TRITON_CONVERSION_TRITONGPU_TO_LLVM_TARGETINFOBASE_H
 
 #include "triton/Conversion/MLIRTypes.h"
+#include "triton/Target/TargetFeatures.h"
 
 namespace mlir::triton {
 enum class ProgramIDDim : uint32_t;
 
 class TargetInfoBase {
+public:
+  // NEW: Feature query API
+  // Subclasses should override this to provide their feature set
+  virtual const TargetFeatureSet& getFeatures() const = 0;
+
+  // Convenience method to check for a specific feature
+  bool hasFeature(TargetFeature feature) const {
+    return getFeatures().has(feature);
+  }
+
+  // Get the best MMA version supported (0, 1, 2, 3, or 5)
+  int getBestMMAVersion() const {
+    return getFeatures().getBestMMAVersion();
+  }
+
 public:
   virtual bool supportMaximumMinimum() const = 0;
 
@@ -97,11 +113,20 @@ public:
 
   virtual int getAddressSpace(Attribute addressSpace) const = 0;
 
-  virtual bool supportVectorizedAtomics() const = 0;
+  virtual bool supportVectorizedAtomics() const {
+    return hasFeature(TargetFeature::VectorizedAtomics);
+  }
 
-  virtual bool supportLdMatrix() const { return false; }
-  virtual bool supportStMatrix() const { return false; }
-  virtual bool supportLdStMatrixB8() const { return false; }
+  // These methods now delegate to the feature query API
+  virtual bool supportLdMatrix() const {
+    return hasFeature(TargetFeature::LdMatrix);
+  }
+  virtual bool supportStMatrix() const {
+    return hasFeature(TargetFeature::StMatrix);
+  }
+  virtual bool supportLdStMatrixB8() const {
+    return hasFeature(TargetFeature::LdStMatrixB8);
+  }
   virtual bool isCuda() const { return false; }
 
   // Annotate target specific information to local load operations during

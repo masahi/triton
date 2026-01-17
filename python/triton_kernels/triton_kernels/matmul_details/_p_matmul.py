@@ -192,7 +192,8 @@ def _p_matmul(
 
     # If true, do not share loop-carried variables between the prologue and the
     # epilogue to enable better pipelining with mmav5
-    INDEPENDENT_EPILOGUE: tl.constexpr = cuda_capability_geq(10, 0)
+    from triton.language.target_features import has_feature, TargetFeature
+    INDEPENDENT_EPILOGUE: tl.constexpr = has_feature(TargetFeature.INDEPENDENT_EPILOGUE_PIPELINING)
 
     # start negative; will be incremented at the top of the loop
     if INDEPENDENT_EPILOGUE:

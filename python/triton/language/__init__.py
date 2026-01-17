@@ -137,6 +137,7 @@ from .random import (
     uint_to_uniform_float,
 )
 from . import target_info
+from . import target_features
 
 __all__ = [
     "PropagateNan",
@@ -263,6 +264,7 @@ __all__ = [
     "sub",
     "sum",
     "swizzle2d",
+    "target_features",
     "target_info",
     "tensor",
     "topk",

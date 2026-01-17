@@ -2,13 +2,16 @@
 #define TRITON_CONVERSION_TRITONGPU_TO_LLVM_TARGETINFONVIDIA_H
 
 #include "triton/Conversion/TritonGPUToLLVM/TargetInfoBase.h"
+#include "triton/Target/TargetArchitecture.h"
 
 namespace mlir::triton::NVIDIA {
 
 class TargetInfo : public mlir::triton::TargetInfoBase {
 public:
   TargetInfo(int computeCapability, int ptxVersion)
-      : computeCapability(computeCapability), ptxVersion(ptxVersion) {}
+      : computeCapability(computeCapability), ptxVersion(ptxVersion),
+        arch_(TargetArchitecture::fromNVIDIA(computeCapability)),
+        features_(arch_.getFeatures()) {}
 
   bool supportMaximumMinimum() const override;
 
@@ -29,9 +32,11 @@ public:
                     std::optional<Value> ctaId, Type elemTy, Value pred,
                     Operation *localLoadOp = nullptr) const override;
 
-  bool supportLdMatrix() const override { return computeCapability >= 75; }
-  bool supportStMatrix() const override { return computeCapability >= 90; }
-  bool supportLdStMatrixB8() const override { return computeCapability >= 100; }
+  // NEW: Feature query API implementation
+  const TargetFeatureSet& getFeatures() const override { return features_; }
+
+  // Note: supportLdMatrix, supportStMatrix, supportLdStMatrixB8 now inherited
+  // from base class and delegate to feature queries
 
   Value shuffleXor(RewriterBase &rewriter, Location loc, Value val,
                    int i) const override;
@@ -79,6 +84,8 @@ public:
 private:
   int computeCapability;
   int ptxVersion;
+  TargetArchitecture arch_;     // NEW: Architecture representation
+  TargetFeatureSet features_;   // NEW: Feature set for this target
 };
 
 } // namespace mlir::triton::NVIDIA

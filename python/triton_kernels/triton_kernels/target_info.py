@@ -60,12 +60,35 @@ def get_rdna_version():
 
 @triton.constexpr_function
 def has_tma_gather():
-    return cuda_capability_geq(10, 0)
+    """Check if target supports TMA gather operations.
+
+    Note: This is only available on sm100-sm119 (Blackwell Ultra).
+    Consumer Blackwell (sm120) does NOT support TMA gather.
+    """
+    from triton.language.target_features import has_feature, TargetFeature
+    return has_feature(TargetFeature.TMA_GATHER)
+
+
+@triton.constexpr_function
+def has_tma_scatter():
+    """Check if target supports TMA scatter operations.
+
+    Note: This is only available on sm100-sm119 (Blackwell Ultra).
+    Consumer Blackwell (sm120) does NOT support TMA scatter.
+    """
+    from triton.language.target_features import has_feature, TargetFeature
+    return has_feature(TargetFeature.TMA_SCATTER)
 
 
 @triton.constexpr_function
 def has_native_mxfp():
-    return cuda_capability_geq(10, 0)
+    """Check if target supports native MXFP4 operations.
+
+    Note: This is only available on sm100-sm119 (Blackwell Ultra).
+    Consumer Blackwell (sm120) does NOT support native MXFP4.
+    """
+    from triton.language.target_features import has_feature, TargetFeature
+    return has_feature(TargetFeature.NATIVE_MXFP4)
 
 
 def num_sms():

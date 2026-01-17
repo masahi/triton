@@ -39,6 +39,7 @@ add_triton_library(TritonAMDGPUToLLVM
     LINK_LIBS PUBLIC
     MLIRReconcileUnrealizedCasts
     TritonGPUToLLVM
+    TritonTarget
     TritonAMDGPUIR
     LLVMCore
     LLVMPasses

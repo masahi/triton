@@ -124,7 +124,8 @@ class PrecisionConfig:
 
 # TODO: merge in opt_flags
 def get_swap_xw(precision_config, opt_flags):
-    if target_info.cuda_capability_geq(10, 0):
+    # Check for native MXFP4 support (sm100-sm119 only, NOT sm120)
+    if target_info.has_native_mxfp():
         return precision_config.b_mx_scale is not None and opt_flags.block_m <= 64 and opt_flags.is_persistent
     elif target_info.cuda_capability_geq(9, 0):
         b_scale_layout = None if not isinstance(precision_config.b_mx_scale, Tensor) else precision_config.b_mx_scale.storage.layout

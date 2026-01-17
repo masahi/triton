@@ -18,6 +18,7 @@
 #include "triton/Dialect/TritonGPU/Transforms/DecomposeScaledBlocked.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Target/TargetArchitecture.h"
 #include "triton/Tools/LayoutUtils.h"
 #include "triton/Tools/StrUtil.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -31,23 +32,30 @@ namespace gpu {
 namespace {
 
 // Get the highest version supported for the hardware and the dot.
+// This now uses feature-based detection to correctly handle cases where
+// newer hardware (e.g., sm120) may lack features from older hardware (e.g., sm100).
 static int getMMAVersionSafe(int computeCapability, DotOp op) {
-  // List supported mma version in order of preference.
+  // Get features for this compute capability using the new feature-based API
+  auto arch = mlir::triton::TargetArchitecture::fromNVIDIA(computeCapability);
+  const auto& features = arch.getFeatures();
+
+  // List supported mma version in order of preference based on features
   SmallVector<int> versionsSupported;
-  if (computeCapability < 75) {
-    versionsSupported = {1};
-  } else if (computeCapability < 90) {
-    versionsSupported = {2};
-  } else if (computeCapability < 100) {
-    versionsSupported = {3, 2};
-  } else if (computeCapability < 120) {
-    // Exclude consumer Blackwell (sm120)
+
+  // Check features in preference order (highest to lowest)
+  if (features.has(mlir::triton::TargetFeature::MMAv5)) {
     versionsSupported = {5, 2};
-  } else if (computeCapability < 130) {
+  } else if (features.has(mlir::triton::TargetFeature::MMAv3)) {
+    versionsSupported = {3, 2};
+  } else if (features.has(mlir::triton::TargetFeature::MMAv2)) {
     versionsSupported = {2};
+  } else if (features.has(mlir::triton::TargetFeature::MMAv1)) {
+    versionsSupported = {1};
   } else {
-    assert(false && "computeCapability not supported");
+    // No MMA support
+    return 0;
   }
+
   for (int baseVersion : versionsSupported) {
     if (supportMMA(op, baseVersion))
       return baseVersion;

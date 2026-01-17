@@ -45,6 +45,7 @@ add_triton_library(TritonGPUTransforms
   MLIRTransformUtils
   TritonAnalysis
   TritonIR
+  TritonTarget
   TritonTransforms
   TritonGPUIR
   TritonNvidiaGPUIR
