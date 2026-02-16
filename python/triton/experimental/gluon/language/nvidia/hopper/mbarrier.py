@@ -32,7 +32,7 @@ def expect(mbarrier, bytes_per_cta=None, pred=True, _semantic=None):
 
 
 @builtin
-def arrive(mbarrier, *, count=1, pred=True, _semantic=None):
+def arrive(mbarrier, *, count=1, pred=True, per_warp=False, _semantic=None):
     """
     Arrive at an mbarrier with a specified count.
 
@@ -43,7 +43,7 @@ def arrive(mbarrier, *, count=1, pred=True, _semantic=None):
     """
     count = _unwrap_if_constexpr(count)
     pred = _semantic.to_tensor(pred)
-    _semantic.builder.create_mbarrier_arrive(mbarrier.handle, count, pred.handle, False)
+    _semantic.builder.create_mbarrier_arrive(mbarrier.handle, count, pred.handle, per_warp)
 
 
 @builtin
