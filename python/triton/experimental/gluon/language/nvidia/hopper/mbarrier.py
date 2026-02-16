@@ -43,7 +43,7 @@ def arrive(mbarrier, *, count=1, pred=True, _semantic=None):
     """
     count = _unwrap_if_constexpr(count)
     pred = _semantic.to_tensor(pred)
-    _semantic.builder.create_mbarrier_arrive(mbarrier.handle, count, pred.handle)
+    _semantic.builder.create_mbarrier_arrive(mbarrier.handle, count, pred.handle, False)
 
 
 @builtin
