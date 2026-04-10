@@ -16,6 +16,8 @@
 namespace mlir::triton::gpu {
 
 namespace {
+constexpr char kDesiredEncodingAttr[] = "tt.desired_encoding";
+
 // Given
 //   dot(convert(trans(src)) #dot_operand) ->
 //   dot(convert(local_load(trans(alloc(src)))))
@@ -217,6 +219,46 @@ public:
   }
 
 private:
+  static Attribute getDesiredDescriptorEncoding(MemDescType baseMemTy) {
+    Attribute encoding = baseMemTy.getEncoding();
+    if (auto nvmma = dyn_cast<NVMMASharedEncodingAttr>(encoding))
+      return nvmma.getTransposed() ? Attribute() : encoding;
+
+    auto sharedLinear = dyn_cast<SharedLinearEncodingAttr>(encoding);
+    if (!sharedLinear)
+      return {};
+
+    auto *ctx = encoding.getContext();
+    auto shape = baseMemTy.getShape();
+    auto cgaLayout = getCGALayout(sharedLinear);
+    auto order = getOrder(sharedLinear, shape);
+    auto elementType = baseMemTy.getElementType();
+
+    SmallVector<NVMMASharedEncodingAttr> preferredCandidates;
+    for (bool fp4Padded : {false, true}) {
+      auto preferred = NVMMASharedEncodingAttr::get(
+          ctx, shape, order, cgaLayout, elementType, fp4Padded);
+      preferredCandidates.push_back(preferred);
+      if (areLayoutsEquivalent(shape, sharedLinear, preferred))
+        return preferred;
+    }
+
+    unsigned elementBitWidth = std::max(8u, elementType.getIntOrFloatBitWidth());
+    for (bool fp4Padded : {false, true}) {
+      for (unsigned swizzle : {0u, 32u, 64u, 128u}) {
+        auto candidate = NVMMASharedEncodingAttr::get(
+            ctx, swizzle, /*transposed=*/false, elementBitWidth, fp4Padded,
+            cgaLayout);
+        if (llvm::is_contained(preferredCandidates, candidate))
+          continue;
+        if (areLayoutsEquivalent(shape, sharedLinear, candidate))
+          return candidate;
+      }
+    }
+
+    return {};
+  }
+
   LogicalResult rewriteOperand(Value operand, PatternRewriter &rewriter) const {
     if (!isa<MemDescType>(operand.getType()))
       return failure();
@@ -268,6 +310,19 @@ private:
       return failure();
 
     std::reverse(tensorReplaySteps.begin(), tensorReplaySteps.end());
+
+    if (Attribute desiredEncoding = getDesiredDescriptorEncoding(baseMemTy)) {
+      if (auto *baseOp = baseTensor.getDefiningOp();
+          isa_and_nonnull<triton::DescriptorLoadOp,
+                          triton::DescriptorGatherOp>(baseOp)) {
+        Attribute existing = baseOp->getDiscardableAttr(kDesiredEncodingAttr);
+        if (!existing || existing == desiredEncoding) {
+          rewriter.modifyOpInPlace(baseOp, [&] {
+            baseOp->setDiscardableAttr(kDesiredEncodingAttr, desiredEncoding);
+          });
+        }
+      }
+    }
 
     PatternRewriter::InsertionGuard guard(rewriter);
     rewriter.setInsertionPoint(localAlloc);
