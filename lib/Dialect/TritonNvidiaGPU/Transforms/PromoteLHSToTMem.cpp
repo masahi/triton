@@ -18,6 +18,9 @@ namespace nvidia_gpu {
 #include "triton/Dialect/TritonNvidiaGPU/Transforms/Passes.h.inc"
 
 namespace {
+constexpr char kOptionalLHSTMemAttrName[] = "ttng.optional_lhs_tmem";
+constexpr char kOptionalLHSSMemTypeAttrName[] = "ttng.optional_lhs_smem_type";
+
 template <class MMAOpTy>
 Attribute getLHSTMemLayout(MMAOpTy tcGen5MMAOp, gpu::MemDescType lhsTMEMType) {
   int numWarps = ttg::lookupNumWarps(tcGen5MMAOp);
@@ -81,6 +84,10 @@ public:
       src = ttg::ConvertLayoutOp::create(rewriter, loc, newTy, src);
     }
     Value tMemAlloc = TMEMAllocOp::create(rewriter, loc, lhsMemDescType, src);
+    auto tMemAllocOp = cast<TMEMAllocOp>(tMemAlloc.getDefiningOp());
+    tMemAllocOp->setAttr(kOptionalLHSTMemAttrName, rewriter.getUnitAttr());
+    tMemAllocOp->setAttr(kOptionalLHSSMemTypeAttrName,
+                         TypeAttr::get(lhs.getType()));
     tcGen5MMAOp.getAMutable().assign(tMemAlloc);
     return success();
   }

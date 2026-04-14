@@ -23,6 +23,8 @@ namespace ttg = triton::gpu;
 #include "triton/Dialect/TritonNvidiaGPU/Transforms/Passes.h.inc"
 
 namespace {
+constexpr char kOptionalLHSTMemAttrName[] = "ttng.optional_lhs_tmem";
+constexpr char kOptionalLHSSMemTypeAttrName[] = "ttng.optional_lhs_smem_type";
 
 // Granularity of row allocations.
 static constexpr int allocGranularity = 64;
@@ -293,17 +295,58 @@ public:
   }
 };
 
-static int
-allocateTMem(Operation *parentOp,
-             DenseMap<triton::nvidia_gpu::TMEMAllocOp, int> &offsets) {
-  SmallVector<triton::nvidia_gpu::TMEMAllocOp> allocs;
-  DenseMap<Operation *, int> operationId;
-  RowIdConstraints rowIdConstraints;
+struct TMemAllocationPlan {
+  DenseMap<TMEMAllocOp, TMemChunk> allocChunks;
+  int totalMemorySize = 0;
+};
+
+static bool isOptionalLHSTMemAlloc(TMEMAllocOp alloc) {
+  return alloc->hasAttr(kOptionalLHSTMemAttrName);
+}
+
+static FailureOr<ttg::MemDescType> getOptionalLHSSMemType(TMEMAllocOp alloc) {
+  auto typeAttr = alloc->getAttrOfType<TypeAttr>(kOptionalLHSSMemTypeAttrName);
+  if (!typeAttr) {
+    alloc.emitOpError("missing fallback shared-memory type attribute");
+    return failure();
+  }
+
+  auto smemType = dyn_cast<ttg::MemDescType>(typeAttr.getValue());
+  if (!smemType) {
+    alloc.emitOpError("fallback shared-memory type attribute must be a memdesc");
+    return failure();
+  }
+  if (!isa<ttg::SharedMemorySpaceAttr>(smemType.getMemorySpace())) {
+    alloc.emitOpError(
+        "fallback shared-memory type attribute must use shared memory");
+    return failure();
+  }
+  return smemType;
+}
+
+static int getTensorMemoryLimit(ModuleOp mod) {
+  auto targetAttr = mod->getAttrOfType<StringAttr>(ttg::AttrTargetName);
+  if (!targetAttr)
+    return 512;
+
+  StringRef target = targetAttr.getValue();
+  if (!target.starts_with("cuda:"))
+    return 512;
+
+  int computeCapability = 0;
+  if (target.drop_front(5).getAsInteger(10, computeCapability))
+    return 512;
+  return computeCapability >= 120 ? 576 : 512;
+}
+
+static SmallVector<TMEMAllocOp>
+collectTMemAllocs(Operation *parentOp, DenseMap<Operation *, int> &operationId,
+                  RowIdConstraints &rowIdConstraints) {
+  SmallVector<TMEMAllocOp> allocs;
   parentOp->walk<WalkOrder::PostOrder>([&](Operation *op) {
     operationId[op] = operationId.size();
-    if (auto alloc = dyn_cast<triton::nvidia_gpu::TMEMAllocOp>(op)) {
+    if (auto alloc = dyn_cast<TMEMAllocOp>(op))
       allocs.push_back(alloc);
-    }
     if (auto mmaOp = dyn_cast<MMAv5OpInterface>(op)) {
       if (isa<TensorMemoryEncodingAttr>(mmaOp.getA().getType().getEncoding())) {
         TMemAllocation allocSize = getTmemAllocSizes(mmaOp.getA().getType());
@@ -329,31 +372,42 @@ allocateTMem(Operation *parentOp,
       }
     }
   });
-  int totalMemorySize = 0;
+  return allocs;
+}
+
+static TMemAllocationPlan
+allocateTMem(ArrayRef<TMEMAllocOp> allocs,
+             DenseMap<TMEMAllocOp, Interval<int>> &liveIntervals,
+             RowIdConstraints &rowIdConstraintsTemplate,
+             DenseSet<TMEMAllocOp> &skippedAllocs) {
+  TMemAllocationPlan plan;
+  RowIdConstraints rowIdConstraints = rowIdConstraintsTemplate;
   MemoryBitMap memoryMap;
-  Liveness liveness(parentOp);
   std::multimap<int, TMemChunk> intervalLiverangeEnd;
-  DenseMap<TMEMAllocOp, TMemChunk> allocChunks;
   // Implement a linear scan first fit algorithm. We expect that fragmentation
   // won't be a problem, if it is this should be revisited.
   for (auto it = allocs.begin(), e = allocs.end(); it != e; ++it) {
     TMEMAllocOp alloc = *it;
+    if (skippedAllocs.contains(alloc))
+      continue;
 
-    // Find all allocations in code that may execute at the same time. Only look
-    // at processed allocations.
+    // Find all allocations in code that may execute at the same time. Only
+    // look at processed allocations.
     SmallVector<TMemChunk> coexistingChunks;
     if (auto ws = alloc->getParentOfType<triton::gpu::WarpSpecializeOp>()) {
       for (auto prevIt = allocs.begin(); prevIt != it; ++prevIt) {
         TMEMAllocOp prevAlloc = *prevIt;
+        if (skippedAllocs.contains(prevAlloc))
+          continue;
         auto prevWs =
             prevAlloc->getParentOfType<triton::gpu::WarpSpecializeOp>();
         if (prevWs && prevWs == ws &&
             alloc->getParentRegion() != prevAlloc->getParentRegion())
-          coexistingChunks.push_back(allocChunks.at(prevAlloc));
+          coexistingChunks.push_back(plan.allocChunks.at(prevAlloc));
       }
     }
 
-    Interval<int> liveInterval = getLiveIntervals(alloc, liveness, operationId);
+    Interval<int> liveInterval = liveIntervals.at(alloc);
     auto memDescType = alloc.getType();
     TMemAllocation allocSize = getTmemAllocSizes(memDescType);
     updateMap(memoryMap, liveInterval, intervalLiverangeEnd);
@@ -366,24 +420,43 @@ allocateTMem(Operation *parentOp,
     TMemChunk chunkAllocated =
         allocFirstFit(memoryMap, allocSize, rowIdConstraint, coexistingChunks,
                       columnAlignment);
-    allocChunks.insert({alloc, chunkAllocated});
+    plan.allocChunks.insert({alloc, chunkAllocated});
     // currently naively constraint allocs based on the first one we find.
     rowIdConstraints.addConstraints(alloc, chunkAllocated.startRow);
     intervalLiverangeEnd.insert({liveInterval.end(), chunkAllocated});
-    int colOffset = chunkAllocated.startCol;
-    int rowOffset = chunkAllocated.startRow * 16;
-
-    alloc->setAttr(
-        "tensor_memory_col_offset",
-        IntegerAttr::get(IntegerType::get(parentOp->getContext(), 32),
-                         colOffset));
-    alloc->setAttr(
-        "tensor_memory_row_offset",
-        IntegerAttr::get(IntegerType::get(parentOp->getContext(), 32),
-                         rowOffset));
-    totalMemorySize = std::max(totalMemorySize, colOffset + allocSize.numCols);
+    plan.totalMemorySize =
+        std::max(plan.totalMemorySize,
+                 chunkAllocated.startCol + allocSize.numCols);
   }
-  return totalMemorySize;
+  return plan;
+}
+
+static LogicalResult demoteOptionalLHSTMemAllocs(
+    ArrayRef<TMEMAllocOp> allocsToDemote) {
+  for (TMEMAllocOp alloc : allocsToDemote) {
+    auto smemType = getOptionalLHSSMemType(alloc);
+    if (failed(smemType))
+      return failure();
+    if (!alloc.getSrc()) {
+      alloc.emitOpError("optional LHS TMEM alloc must have a tensor source");
+      return failure();
+    }
+
+    OpBuilder builder(alloc);
+    Value smemAlloc = ttg::LocalAllocOp::create(builder, alloc.getLoc(),
+                                                *smemType, alloc.getSrc());
+    for (Operation *user : llvm::make_early_inc_range(alloc->getUsers())) {
+      auto mma = dyn_cast<MMAv5OpInterface>(user);
+      if (!mma || mma.getA() != alloc.getResult()) {
+        alloc.emitOpError(
+            "optional LHS TMEM alloc has unsupported non-MMA users");
+        return failure();
+      }
+      user->setOperand(0, smemAlloc);
+    }
+    alloc->erase();
+  }
+  return success();
 }
 
 } // anonymous namespace
@@ -400,15 +473,68 @@ public:
     ModuleOp mod = getOperation();
     MLIRContext *ctx = &getContext();
 
-    DenseMap<triton::nvidia_gpu::TMEMAllocOp, int> offsets;
-    // TODO: handle cases with multiple function with TMEMAllocOp.
-    int totalMemorySize = allocateTMem(mod, offsets);
+    DenseMap<Operation *, int> operationId;
+    RowIdConstraints rowIdConstraints;
+    SmallVector<TMEMAllocOp> allocs =
+        collectTMemAllocs(mod, operationId, rowIdConstraints);
+    Liveness liveness(mod);
+    DenseMap<TMEMAllocOp, Interval<int>> liveIntervals;
+    for (TMEMAllocOp alloc : allocs)
+      liveIntervals[alloc] = getLiveIntervals(alloc, liveness, operationId);
 
-    std::array<int, 6> possibleAllocations = {0, 32, 64, 128, 256, 512};
-    // NOTE: if totalMemorySize > 512 we exceeded the maximum amount of tensor
-    // memory, but we let the compilation finish so that we can raise an
-    // exception in python for the auto-tuner.
-    if (totalMemorySize <= 512) {
+    DenseSet<TMEMAllocOp> demotedOptionalAllocs;
+    TMemAllocationPlan plan =
+        allocateTMem(allocs, liveIntervals, rowIdConstraints,
+                     demotedOptionalAllocs);
+    const int tensorMemoryLimit = getTensorMemoryLimit(mod);
+    if (plan.totalMemorySize > tensorMemoryLimit) {
+      SmallVector<TMEMAllocOp> optionalAllocs;
+      for (TMEMAllocOp alloc : allocs) {
+        if (isOptionalLHSTMemAlloc(alloc))
+          optionalAllocs.push_back(alloc);
+      }
+      llvm::sort(optionalAllocs, [&](TMEMAllocOp lhs, TMEMAllocOp rhs) {
+        const TMemChunk &lhsChunk = plan.allocChunks.at(lhs);
+        const TMemChunk &rhsChunk = plan.allocChunks.at(rhs);
+        if (lhsChunk.startCol != rhsChunk.startCol)
+          return lhsChunk.startCol > rhsChunk.startCol;
+        return operationId.lookup(lhs.getOperation()) >
+               operationId.lookup(rhs.getOperation());
+      });
+      for (TMEMAllocOp alloc : optionalAllocs) {
+        demotedOptionalAllocs.insert(alloc);
+        plan = allocateTMem(allocs, liveIntervals, rowIdConstraints,
+                            demotedOptionalAllocs);
+        if (plan.totalMemorySize <= tensorMemoryLimit)
+          break;
+      }
+    }
+
+    SmallVector<TMEMAllocOp> allocsToDemote;
+    for (TMEMAllocOp alloc : allocs) {
+      if (demotedOptionalAllocs.contains(alloc)) {
+        allocsToDemote.push_back(alloc);
+        continue;
+      }
+      auto chunkAllocated = plan.allocChunks.at(alloc);
+      int colOffset = chunkAllocated.startCol;
+      int rowOffset = chunkAllocated.startRow * 16;
+      alloc->setAttr("tensor_memory_col_offset",
+                     IntegerAttr::get(IntegerType::get(ctx, 32), colOffset));
+      alloc->setAttr("tensor_memory_row_offset",
+                     IntegerAttr::get(IntegerType::get(ctx, 32), rowOffset));
+    }
+    if (failed(demoteOptionalLHSTMemAllocs(allocsToDemote))) {
+      signalPassFailure();
+      return;
+    }
+
+    int totalMemorySize = plan.totalMemorySize;
+    std::array<int, 7> possibleAllocations = {0, 32, 64, 128, 256, 512, 576};
+    // NOTE: if totalMemorySize exceeds the architecture limit we let the
+    // compilation finish so that we can raise an exception in python for the
+    // auto-tuner.
+    if (totalMemorySize <= tensorMemoryLimit) {
       for (int size : possibleAllocations) {
         if (totalMemorySize <= size) {
           totalMemorySize = size;

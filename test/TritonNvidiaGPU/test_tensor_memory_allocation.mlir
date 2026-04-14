@@ -1,4 +1,5 @@
 // RUN: triton-opt %s -split-input-file -allow-unregistered-dialect -triton-tensor-memory-allocation | FileCheck %s
+// RUN: triton-opt %s -split-input-file -allow-unregistered-dialect -triton-tensor-memory-allocation -allocate-shared-memory | FileCheck %s --check-prefix=CHECK-SMEM
 
 #blocked = #ttg.blocked<{sizePerThread = [1, 128], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [0, 1]}>
 #blocked1 = #ttg.blocked<{sizePerThread = [1, 32], threadsPerWarp = [16, 2], warpsPerCTA = [4, 1], order = [0, 1]}>
@@ -293,6 +294,45 @@ tt.func @mma_scaled_lhs_tmem(
   tt.return
 }
 
+}
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 128], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [0, 1]}>
+#shared = #ttg.nvmma_shared<{swizzlingByteWidth = 128, transposed = false, elementBitWidth = 16}>
+#tmem_lhs = #ttng.tensor_memory_encoding<blockM = 128, blockN = 128, colStride = 1>
+#tmem_acc = #ttng.tensor_memory_encoding<blockM = 128, blockN = 128, colStride = 1>
+
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 65536 : i32, ttg.target = "cuda:100", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK: ttg.tensor_memory_size = 512
+  // CHECK-LABEL: @demote_optional_lhs_tmem
+  // CHECK-SMEM-LABEL: @demote_optional_lhs_tmem
+  tt.func @demote_optional_lhs_tmem() {
+    %true = arith.constant true
+    %a = arith.constant dense<0.000000e+00> : tensor<128x128xf16, #blocked>
+    %b = arith.constant dense<0.000000e+00> : tensor<128x128xf16, #blocked>
+    %acc = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #blocked>
+    %b_sh = ttg.local_alloc %b : (tensor<128x128xf16, #blocked>) -> !ttg.memdesc<128x128xf16, #shared, #ttg.shared_memory, mutable>
+
+    // CHECK-COUNT-4: ttng.tmem_alloc %{{.*}} {tensor_memory_col_offset =
+    // CHECK-NOT: ttng.optional_lhs_tmem
+    // CHECK: %[[A_SMEM:.+]] = ttg.local_alloc %{{.*}} : (tensor<128x128xf16, #blocked>) -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // CHECK: ttng.tc_gen5_mma %[[A_SMEM]], %{{.*}}, %{{.*}}, %true, %true : !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // CHECK-SMEM: ttng.tmem_alloc %{{.*}} {tensor_memory_col_offset = 384 : i32, tensor_memory_row_offset = 0 : i32}
+    // CHECK-SMEM-NEXT: %[[A_SMEM:.+]] = ttg.local_alloc %{{.*}} {allocation.offset = [[OFF:[0-9]+]] : i32} : (tensor<128x128xf16, #blocked>) -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // CHECK-SMEM: ttng.tc_gen5_mma %[[A_SMEM]], %{{.*}}, %{{.*}}, %true, %true : !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    %d0 = ttng.tmem_alloc %acc : (tensor<128x128xf32, #blocked>) -> !ttg.memdesc<128x128xf32, #tmem_acc, #ttng.tensor_memory, mutable>
+    %d1 = ttng.tmem_alloc %acc : (tensor<128x128xf32, #blocked>) -> !ttg.memdesc<128x128xf32, #tmem_acc, #ttng.tensor_memory, mutable>
+    %d2 = ttng.tmem_alloc %acc : (tensor<128x128xf32, #blocked>) -> !ttg.memdesc<128x128xf32, #tmem_acc, #ttng.tensor_memory, mutable>
+    %d3 = ttng.tmem_alloc %acc : (tensor<128x128xf32, #blocked>) -> !ttg.memdesc<128x128xf32, #tmem_acc, #ttng.tensor_memory, mutable>
+    %a_tm = ttng.tmem_alloc %a {ttng.optional_lhs_smem_type = !ttg.memdesc<128x128xf16, #shared, #ttg.shared_memory, mutable>, ttng.optional_lhs_tmem} : (tensor<128x128xf16, #blocked>) -> !ttg.memdesc<128x128xf16, #tmem_lhs, #ttng.tensor_memory>
+
+    ttng.tmem_store %acc, %d1, %true : tensor<128x128xf32, #blocked> -> !ttg.memdesc<128x128xf32, #tmem_acc, #ttng.tensor_memory, mutable>
+    ttng.tmem_store %acc, %d2, %true : tensor<128x128xf32, #blocked> -> !ttg.memdesc<128x128xf32, #tmem_acc, #ttng.tensor_memory, mutable>
+    ttng.tmem_store %acc, %d3, %true : tensor<128x128xf32, #blocked> -> !ttg.memdesc<128x128xf32, #tmem_acc, #ttng.tensor_memory, mutable>
+    ttng.tc_gen5_mma %a_tm, %b_sh, %d0, %true, %true : !ttg.memdesc<128x128xf16, #tmem_lhs, #ttng.tensor_memory>, !ttg.memdesc<128x128xf16, #shared, #ttg.shared_memory, mutable>, !ttg.memdesc<128x128xf32, #tmem_acc, #ttng.tensor_memory, mutable>
+    tt.return
+  }
 }
 
 // -----

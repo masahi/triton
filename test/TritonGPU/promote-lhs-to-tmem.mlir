@@ -12,6 +12,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
   // CHECK: scf.for
   // CHECK: %[[A:.+]] = tt.load
   // CHECK: %[[A_TMEM:.+]] = ttng.tmem_alloc %[[A]]
+  // CHECK-SAME: ttng.optional_lhs_smem_type
+  // CHECK-SAME: ttng.optional_lhs_tmem
   // CHECK: ttng.tc_gen5_mma %[[A_TMEM]]
   tt.func public @promote_lhs(%A_ptr: tensor<128x128x!tt.ptr<f16>, #blocked1>, %B_ptr: tensor<128x128x!tt.ptr<f16>, #blocked1>, %arg3: i32) -> tensor<128x128xf16, #blocked1> {
     %true = arith.constant true
@@ -37,6 +39,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
   // CHECK: scf.for
   // CHECK: %[[A:.+]] = tt.load
   // CHECK: %[[A_TMEM:.+]] = ttng.tmem_alloc %[[A]]
+  // CHECK-SAME: ttng.optional_lhs_smem_type
+  // CHECK-SAME: ttng.optional_lhs_tmem
   // CHECK: ttng.tc_gen5_mma_scaled %[[A_TMEM]]
   tt.func public @promote_lhs_mxfp(%A_ptr: tensor<128x128x!tt.ptr<f16>, #blocked1>, %B_ptr: tensor<128x128x!tt.ptr<f16>, #blocked1>, %arg3: i32, %a_scale: tensor<128x1xi8, #blocked2>, %b_scale: tensor<64x1xi8, #blocked2>) -> tensor<128x128xf16, #blocked1> {
     %true = arith.constant true
