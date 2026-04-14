@@ -310,7 +310,9 @@ ttng::TMEMAllocOp ttng::createTMemAlloc(OpBuilder &builder,
   Type accMemDescType = triton::gpu::MemDescType::get(
       shape, oldRetType.getElementType(), oldRetType.getEncoding(),
       oldRetType.getMemorySpace(), /*mutableMemory=*/true);
-  return ttng::TMEMAllocOp::create(
+  auto newAlloc = ttng::TMEMAllocOp::create(
       builder, oldTMemAllocOp.getLoc(), accMemDescType,
       builder.getType<gpu::AsyncTokenType>(), /*src=*/Value());
+  newAlloc->setAttrs(oldTMemAllocOp->getAttrs());
+  return newAlloc;
 }
