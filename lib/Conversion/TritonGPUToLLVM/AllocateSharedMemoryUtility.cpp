@@ -45,9 +45,16 @@ void attachAllocationSizeAndOffsetAttr(ModuleOp mod,
     });
     return WalkResult::skip();
   });
+  int64_t sharedSize = allocation.getSharedMemorySize();
+  if (auto tmemSizeAttr = mod->getAttrOfType<IntegerAttr>("ttg.tensor_memory_size");
+      tmemSizeAttr && tmemSizeAttr.getInt() > 0 && sharedSize < 4) {
+    // tcgen05.alloc requires at least 4 bytes of shared memory even if the
+    // kernel otherwise uses only TMEM.
+    sharedSize = 4;
+  }
   mod->setAttr("ttg.shared",
                mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 32),
-                                      allocation.getSharedMemorySize()));
+                                      sharedSize));
 }
 
 } // namespace mlir::triton::gpu
