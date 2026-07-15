@@ -291,6 +291,54 @@ tt.func public @attention_forward(
 
 // -----
 
+#a_layout = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [4, 1], order = [0, 1]}>
+#b_layout = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [1, 4], order = [1, 0]}>
+#scale_layout = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [1, 4], order = [1, 0]}>
+#acc_layout = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [1, 4], order = [1, 0]}>
+#a_shared = #ttg.nvmma_shared<{swizzlingByteWidth = 64, transposed = false, elementBitWidth = 8}>
+#b_shared = #ttg.nvmma_shared<{swizzlingByteWidth = 128, transposed = false, elementBitWidth = 8, fp4Padded = true}>
+
+module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:120"} {
+  // A dot_scaled consumer is compute work in the default partition on SM120,
+  // but descriptor loads feeding it must remain in a TMA producer partition.
+  // CHECK-LABEL: @dot_scaled_tma_producer
+  // CHECK-COUNT-2: ttng.init_barrier
+  // CHECK: ttg.warp_specialize
+  // CHECK-LABEL: default
+  // CHECK: tt.dot_scaled
+  // CHECK-LABEL: partition0
+  // CHECK-COUNT-2: ttng.async_tma_copy_global_to_local
+  // CHECK-NOT: partition1
+  // OPT-LABEL: @dot_scaled_tma_producer
+  // OPT-COUNT-2: ttng.init_barrier
+  // OPT-LABEL: partition0
+  // OPT-SAME: num_warps(1)
+  tt.func @dot_scaled_tma_producer(
+    %a_desc: !tt.tensordesc<128x64xf8E4M3FN, #a_shared>,
+    %b_desc: !tt.tensordesc<32x128xi8, #b_shared>,
+    %scale_a: tensor<128x2xi8, #scale_layout>,
+    %scale_b: tensor<128x2xi8, #scale_layout>
+  ) {
+    %c0_i32 = arith.constant 0 : i32
+    %c1_i32 = arith.constant 1 : i32
+    %k_tiles = arith.constant 32 : i32
+    %zero = arith.constant dense<0.0> : tensor<128x128xf32, #acc_layout>
+    %result = scf.for %k = %c0_i32 to %k_tiles step %c1_i32 iter_args(%acc = %zero) -> tensor<128x128xf32, #acc_layout> : i32 {
+      %a = tt.descriptor_load %a_desc[%c0_i32, %k] : !tt.tensordesc<128x64xf8E4M3FN, #a_shared> -> tensor<128x64xf8E4M3FN, #a_layout>
+      %b = tt.descriptor_load %b_desc[%k, %c0_i32] : !tt.tensordesc<32x128xi8, #b_shared> -> tensor<32x128xi8, #b_layout>
+      %next = tt.dot_scaled %a scale %scale_a, %b scale %scale_b, %acc lhs = e4m3 rhs = e2m1 {fastMath = false}
+        : tensor<128x64xf8E4M3FN, #a_layout>, tensor<128x2xi8, #scale_layout>
+          * tensor<32x128xi8, #b_layout>, tensor<128x2xi8, #scale_layout>
+          -> tensor<128x128xf32, #acc_layout>
+      scf.yield %next : tensor<128x128xf32, #acc_layout>
+    } {tt.num_stages = 2 : i32, tt.warp_specialize}
+    "use"(%result) : (tensor<128x128xf32, #acc_layout>) -> ()
+    tt.return
+  }
+}
+
+// -----
+
 #indices_layout = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
 module attributes {"ttg.num-warps" = 4 : i32, ttg.target = "cuda:100"} {
   // CHECK-LABEL: @no_eligible_memory_ops

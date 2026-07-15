@@ -713,7 +713,8 @@ SmallVector<std::pair<std::string, std::function<bool(Edge)>>> heuristics = {
        while (!stack.empty()) {
          auto node = stack.back();
          stack.pop_back();
-         if (isMMA(node) || (node->isOp() && isa<tt::DotOp>(node->getOp()))) {
+         if (isMMA(node) ||
+             (node->isOp() && isa<tt::DotOp, tt::DotScaledOp>(node->getOp()))) {
            return false;
          } else {
            for (auto edge : node->getOutEdges()) {

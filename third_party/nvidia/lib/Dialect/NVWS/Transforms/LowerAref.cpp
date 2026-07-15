@@ -46,6 +46,7 @@
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/Transforms/TMAUtilities.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/ErrorHandling.h"
 
 using namespace mlir::triton;
@@ -823,11 +824,37 @@ ExitOp createCombinedArefOps(SmallVector<EnterOp> &enterOps,
   return combinedExit;
 }
 
+bool isRegisterViewOp(Operation *op) {
+  return isa<ReshapeOp, TransOp, ExpandDimsOp, BroadcastOp,
+             gpu::ConvertLayoutOp>(op);
+}
+
+void findRegisterSinkOps(Value value, SmallVectorImpl<Operation *> &sinkOps,
+                         llvm::SmallPtrSetImpl<Operation *> &visited) {
+  for (Operation *user : value.getUsers()) {
+    if (!visited.insert(user).second)
+      continue;
+    if (!isRegisterViewOp(user)) {
+      sinkOps.push_back(user);
+      continue;
+    }
+    for (Value result : user->getResults())
+      findRegisterSinkOps(result, sinkOps, visited);
+  }
+}
+
 SmallVector<Operation *> findSharedMemorySinkOps(Value value) {
   SmallVector<Operation *> sinkOps;
   for (Operation *user : value.getUsers()) {
-    if (isa<MMAv5OpInterface, LocalLoadOp>(user)) {
+    if (isa<MMAv5OpInterface>(user)) {
       sinkOps.push_back(user);
+    } else if (isa<LocalLoadOp>(user)) {
+      llvm::SmallPtrSet<Operation *, 8> visited;
+      for (Value result : user->getResults())
+        findRegisterSinkOps(result, sinkOps, visited);
+      // Preserve the old behavior for an unused local load.
+      if (sinkOps.empty())
+        sinkOps.push_back(user);
     } else if (user->hasTrait<OpTrait::MemDescViewTrait>()) {
       auto rec = findSharedMemorySinkOps(user->getResult(0));
       sinkOps.insert(sinkOps.end(), rec.begin(), rec.end());

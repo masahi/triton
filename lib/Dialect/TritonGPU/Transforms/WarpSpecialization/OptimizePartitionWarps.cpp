@@ -195,15 +195,21 @@ static LogicalResult optimizePartitionNumWarps(ModuleAxisInfoAnalysis &axisInfo,
 
   // Determine if a partition has a lower limit on the number of warps.
   SmallVector<int32_t> minWarpsForPartition(partitionNumWarps.size(), 1);
+  auto target =
+      axisInfo.getModuleOp()->getAttrOfType<StringAttr>(AttrTargetName);
+  bool isSM120 = target && target.getValue() == "cuda:120";
   for (auto [minWarps, region] :
        llvm::zip(minWarpsForPartition, wsOp.getPartitionRegions())) {
-    region->walk([minWarps = &minWarps](Operation *op) {
+    region->walk([minWarps = &minWarps, isSM120](Operation *op) {
       // Some instructions have critical throughput if have low register usage.
       // Make sure there are enough warps for these ops to execute quickly.
       // TMAStoreLikeOps stay in the main partition, so they should not appear
       // in partition regions here.
+      // One producer warp is sufficient to issue TMA loads on SM120. Unlike
+      // WGMMA/TCGen5 kernels, its synchronous MMA has no warp-group producer
+      // requirement, and a second producer warp reduces compute throughput.
       if (isa<ttng::TMALoadLikeOpInterface>(op))
-        *minWarps = 2;
+        *minWarps = isSM120 ? 1 : 2;
       // TMEM ops require at least 4 warps to be able to read all lanes.
       else if (isa<ttng::TMEMLoadOp, ttng::TMEMStoreOp, ttng::TMEMAllocOp>(op))
         *minWarps = 4;
