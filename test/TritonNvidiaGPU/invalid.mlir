@@ -920,6 +920,21 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
 
 #tmem = #ttng.tensor_memory_encoding<blockM = 128, blockN = 128, colStride = 1>
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
+  tt.func public @tmem_subslice_non_aligned_noncontiguous() {
+    // The four 128x128 logical tiles are stored in physical order [0, 2, 1, 3].
+    // This view spans the second half of tiles 0 and 2 and the first half of
+    // tiles 1 and 3, so it cannot be represented by shifting a dense TMEM base.
+    %md = ttng.tmem_alloc : () -> !ttg.memdesc<256x256xf32, #tmem, #ttng.tensor_memory, mutable>
+    // expected-error @+1 {{The non-aligned subslice must be contiguous in tensor memory}}
+    %sub = ttng.tmem_subslice %md {offset = 64 : i32} : !ttg.memdesc<256x256xf32, #tmem, #ttng.tensor_memory, mutable> -> !ttg.memdesc<256x128xf32, #tmem, #ttng.tensor_memory, mutable, 256x256>
+    tt.return
+  }
+}
+
+// -----
+
+#tmem = #ttng.tensor_memory_encoding<blockM = 128, blockN = 128, colStride = 1>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
   tt.func public @tmem_subslice_offset_exceed() {
     %md = ttng.tmem_alloc : () -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
     // expected-error @+1 {{The split offset may not exceed the source shape}}

@@ -1542,6 +1542,75 @@ LogicalResult TMEMCopyOp::verify() {
   return success();
 }
 
+// Returns true if a subview with `dstTy.getShape()` beginning at `offset` in
+// logical dimension `dim` can be represented by shifting the TMEM base while
+// retaining the source encoding. This is not implied by the view shape alone:
+// a non-aligned logical interval can cross physical tiles that are stored in a
+// different order.
+static bool isTMemSubSliceContiguous(MemDescType srcTy, MemDescType dstTy,
+                                     int32_t offset, int32_t dim) {
+  // Tile-aligned slices preserve the layout by construction. Besides avoiding
+  // unnecessary work, this retains the verifier's original fast path.
+  if ((offset & (dstTy.getDimSize(dim) - 1)) == 0)
+    return true;
+
+  auto srcLayout = toLinearLayout(srcTy);
+  auto viewLayout = toLinearLayout(dstTy.getShape(), dstTy.getEncoding());
+  auto srcInverse = srcLayout.pseudoinvert();
+  auto outDims = standardOutDimNames(srcTy.getContext(), srcTy.getRank());
+
+  SmallVector<std::pair<StringAttr, int32_t>> logicalOffset;
+  for (auto outDim : outDims)
+    logicalOffset.push_back({outDim, 0});
+  logicalOffset[dim].second = offset;
+  auto physicalOffset = srcInverse.apply(logicalOffset);
+
+  auto kRow = StringAttr::get(srcTy.getContext(), "row");
+  auto kCol = StringAttr::get(srcTy.getContext(), "col");
+  for (auto [inputDim, value] : physicalOffset) {
+    // A block offset cannot be represented by shifting a per-CTA TMEM base.
+    if (inputDim != kRow && inputDim != kCol && value != 0)
+      return false;
+  }
+
+  // Non-aligned integer translations are not linear over F2 because of carry
+  // propagation. Enumerate the bounded TMEM address domain (at most 128x512
+  // addresses per CTA) and compare the translated source mapping with the
+  // origin-based view mapping exactly.
+  int64_t numInputs = viewLayout.getTotalInDimSize();
+  SmallVector<std::pair<StringAttr, int32_t>> relativePhysical;
+  relativePhysical.reserve(viewLayout.getNumInDims());
+  for (int64_t linear = 0; linear < numInputs; ++linear) {
+    relativePhysical.clear();
+    int64_t value = linear;
+    for (auto inputDim : viewLayout.getInDimNames()) {
+      int32_t size = viewLayout.getInDimSize(inputDim);
+      relativePhysical.push_back({inputDim, value & (size - 1)});
+      value >>= llvm::Log2_32(size);
+    }
+
+    auto expectedLogical = viewLayout.apply(relativePhysical);
+    expectedLogical[dim].second += offset;
+
+    auto sourcePhysical = relativePhysical;
+    for (auto &[inputDim, inputValue] : sourcePhysical) {
+      if (inputDim != kRow && inputDim != kCol)
+        continue;
+      auto it = llvm::find_if(physicalOffset, [&](auto namedValue) {
+        return namedValue.first == inputDim;
+      });
+      assert(it != physicalOffset.end());
+      inputValue += it->second;
+      if (inputValue >= srcLayout.getInDimSize(inputDim))
+        return false;
+    }
+
+    if (srcLayout.apply(sourcePhysical) != expectedLogical)
+      return false;
+  }
+  return true;
+}
+
 // -- TMEMSubSliceOp --
 LogicalResult TMEMSubSliceOp::verify() {
   auto srcTy = cast<triton::gpu::MemDescType>(getSrc().getType());
@@ -1579,7 +1648,7 @@ LogicalResult TMEMSubSliceOp::verify() {
   auto srcShape = srcTy.getShape();
   auto dstShape = dstTy.getShape();
   auto offset = getOffset();
-  if (offset + dstShape[dim] > srcShape[dim]) {
+  if (offset < 0 || offset + dstShape[dim] > srcShape[dim]) {
     return emitError("The split offset may not exceed the source shape");
   }
   auto srcLL = toLinearLayout(srcTy);
@@ -1598,6 +1667,9 @@ LogicalResult TMEMSubSliceOp::verify() {
   if (uint64_t(rowCol[1].second) * srcTy.getElementTypeBitWidth() % 32 != 0)
     return emitOpError(
         "The split offset must be 32-bit aligned in tensor memory.");
+  if (!isTMemSubSliceContiguous(srcTy, dstTy, offset, dim))
+    return emitError(
+        "The non-aligned subslice must be contiguous in tensor memory");
 
   return success();
 }
