@@ -302,8 +302,8 @@ void MembarAnalysis::update(Operation *op, BlockInfo *blockInfo,
     auto interval = allocation.getAllocatedInterval(scratchBufferId);
     auto scratchSlice = AllocationSlice(interval);
     curBlockInfo.syncWriteSlices[scratchSlice].insert(op);
-    auto insertCTABarrier =
-        blockInfo->isIntersected(curBlockInfo, filter, &allocation);
+    auto insertCTABarrier = blockInfo->isIntersected(curBlockInfo, filter,
+                                                     &allocation, sliceFilter);
     if (insertCTABarrier) {
       builder->setInsertionPoint(op);
       insertBarrier(op, builder);
@@ -319,7 +319,8 @@ void MembarAnalysis::update(Operation *op, BlockInfo *blockInfo,
       curBlockInfo.sync();
     }
     curBlockInfo.syncReadSlices[scratchSlice].insert(op);
-  } else if (blockInfo->isIntersected(curBlockInfo, filter, &allocation)) {
+  } else if (blockInfo->isIntersected(curBlockInfo, filter, &allocation,
+                                      sliceFilter)) {
     builder->setInsertionPoint(op);
     insertBarrier(op, builder);
     blockInfo->sync();

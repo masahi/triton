@@ -54,7 +54,9 @@ static bool isDistributedMultiCTAOp(Operation *op, bool isRead) {
   return hasTCGen5CommitCrossCTA(op);
 }
 
-static bool isPreAllocAliasSliceFilter(const AllocationSlice &lhsSlice,
+static bool isPreAllocAliasSliceFilter(Operation * /*lhsOp*/,
+                                       Operation * /*rhsOp*/,
+                                       const AllocationSlice &lhsSlice,
                                        const AllocationSlice &rhsSlice,
                                        bool /*lhsIsRead*/, bool /*rhsIsRead*/,
                                        Allocation *allocation) {

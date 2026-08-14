@@ -170,7 +170,8 @@ LogicalResult ConvertTritonGPUToLLVM::prepareModule(ModuleOp mod,
           allocation, computeCapability)))
     return failure();
 
-  ModuleMembarAnalysis membarPass(allocation, canSkipBarSync);
+  ModuleMembarAnalysis membarPass(allocation, canSkipBarSync,
+                                  canSkipBarSyncOnSlice);
   membarPass.run();
 
   if (enableConcurrencySanitizer) {
@@ -362,6 +363,34 @@ bool NVIDIA::canSkipBarSync(Operation *before, Operation *after,
          beforeAtomic.getAtomicRmwOp() == afterAtomic.getAtomicRmwOp() &&
          beforeAtomic.getDst().getType().getElementType() ==
              afterAtomic.getDst().getType().getElementType();
+}
+
+bool NVIDIA::canSkipBarSyncOnSlice(Operation *before, Operation *after,
+                                   const AllocationSlice &beforeSlice,
+                                   const AllocationSlice &afterSlice,
+                                   bool beforeIsRead, bool afterIsRead,
+                                   Allocation *allocation) {
+  // Multiple TMA loads may accumulate their completion bytes in the same
+  // mbarrier. Those updates do not conflict with one another, but the loads'
+  // shared-memory destinations still need normal WAW dependency checking.
+  if (beforeIsRead || afterIsRead)
+    return false;
+  auto beforeTma = dyn_cast<ttng::TMALoadLikeOpInterface>(before);
+  auto afterTma = dyn_cast<ttng::TMALoadLikeOpInterface>(after);
+  if (!beforeTma || !afterTma)
+    return false;
+
+  auto bufferId = beforeSlice.getBufferId();
+  if (bufferId == Allocation::InvalidBufferId ||
+      bufferId != afterSlice.getBufferId())
+    return false;
+
+  auto beforeBarrierIds =
+      allocation->getAllBufferIdsWithAliases(beforeTma.getBarrier());
+  auto afterBarrierIds =
+      allocation->getAllBufferIdsWithAliases(afterTma.getBarrier());
+  return beforeBarrierIds.contains(bufferId) &&
+         afterBarrierIds.contains(bufferId);
 }
 
 } // namespace mlir::triton

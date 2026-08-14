@@ -25,9 +25,9 @@ using MembarFilterFn =
                        bool /*rhsIsRead*/, Allocation *)>;
 
 /// Slice-level filter to allow backends to ignore specific aliasing cases.
-using MembarSliceFilterFn =
-    std::function<bool(const AllocationSlice &, const AllocationSlice &,
-                       bool /*lhsIsRead*/, bool /*rhsIsRead*/, Allocation *)>;
+using MembarSliceFilterFn = std::function<bool(
+    Operation *, Operation *, const AllocationSlice &, const AllocationSlice &,
+    bool /*lhsIsRead*/, bool /*rhsIsRead*/, Allocation *)>;
 
 // Represents the access to a slice of an allocation
 // It contains information both on physical memory (the interval) and a
@@ -182,13 +182,14 @@ private:
     for (auto &lhs : lhsSlices)
       for (auto &rhs : rhsSlices)
         if (lhs.first.intersects(rhs.first))
-          if (!sliceFilter || !sliceFilter(lhs.first, rhs.first, lhsIsRead,
-                                           rhsIsRead, allocation))
-            for (auto lhsOp : lhs.second)
-              for (auto rhsOp : rhs.second)
-                if (!filter ||
-                    !filter(lhsOp, rhsOp, lhsIsRead, rhsIsRead, allocation))
-                  return true;
+          for (auto lhsOp : lhs.second)
+            for (auto rhsOp : rhs.second)
+              if ((!sliceFilter ||
+                   !sliceFilter(lhsOp, rhsOp, lhs.first, rhs.first, lhsIsRead,
+                                rhsIsRead, allocation)) &&
+                  (!filter ||
+                   !filter(lhsOp, rhsOp, lhsIsRead, rhsIsRead, allocation)))
+                return true;
     return false;
   }
 };
@@ -225,12 +226,15 @@ bool containsLocalBarrier(Operation *op);
 class MembarOrFenceAnalysis
     : public triton::PostOrderFunctionAnalysis<BlockInfo> {
 public:
-  MembarOrFenceAnalysis(Allocation &allocation, MembarFilterFn filter)
-      : allocation(allocation), filter(std::move(filter)) {}
+  MembarOrFenceAnalysis(Allocation &allocation, MembarFilterFn filter,
+                        MembarSliceFilterFn sliceFilter = nullptr)
+      : allocation(allocation), filter(std::move(filter)),
+        sliceFilter(std::move(sliceFilter)) {}
 
 protected:
   Allocation &allocation;
   MembarFilterFn filter;
+  MembarSliceFilterFn sliceFilter;
 };
 
 class MembarAnalysis : public MembarOrFenceAnalysis {
@@ -248,8 +252,10 @@ public:
   /// a shared memory read. If the temporary storage is written but not read,
   /// it is considered as the problem of the operation itself but not the membar
   /// analysis.
-  MembarAnalysis(Allocation &allocation, MembarFilterFn filter)
-      : MembarOrFenceAnalysis(allocation, std::move(filter)),
+  MembarAnalysis(Allocation &allocation, MembarFilterFn filter,
+                 MembarSliceFilterFn sliceFilter = nullptr)
+      : MembarOrFenceAnalysis(allocation, std::move(filter),
+                              std::move(sliceFilter)),
         bufferIndexAnalysis(
             cast<FunctionOpInterface>(allocation.getOperation())) {}
 
@@ -277,9 +283,11 @@ template <typename AnalysisT>
 class ModuleMembarOrFenceAnalysis : public triton::CallGraph<BlockInfo> {
 public:
   ModuleMembarOrFenceAnalysis(ModuleAllocation &moduleAllocation,
-                              MembarFilterFn filter = nullptr)
+                              MembarFilterFn filter = nullptr,
+                              MembarSliceFilterFn sliceFilter = nullptr)
       : triton::CallGraph<BlockInfo>(moduleAllocation.getModuleOp()),
-        moduleAllocation(moduleAllocation), filter(std::move(filter)) {}
+        moduleAllocation(moduleAllocation), filter(std::move(filter)),
+        sliceFilter(std::move(sliceFilter)) {}
 
   void run() {
     walk<WalkOrder::PreOrder, WalkOrder::PostOrder>(
@@ -290,13 +298,14 @@ public:
           auto &allocation = *moduleAllocation.getFuncData(funcOp);
           if (!funcMap.try_emplace(funcOp).second)
             return;
-          AnalysisT(allocation, filter).run(funcOp, funcMap);
+          AnalysisT(allocation, filter, sliceFilter).run(funcOp, funcMap);
         });
   }
 
 private:
   ModuleAllocation &moduleAllocation;
   MembarFilterFn filter;
+  MembarSliceFilterFn sliceFilter;
 };
 
 using ModuleMembarAnalysis = ModuleMembarOrFenceAnalysis<MembarAnalysis>;
