@@ -1095,32 +1095,39 @@ def select_kernel_config(
             split_exp_factor = _default_split_exp_factor(head_dim)
             use_selected_tmem_red = use_tmem_red and not causal
 
-    if is_rubin():
-        if head_dim == 64 and is_fp8 and (causal or not use_tmem_red):
-            group_size_n = 8 if causal else 1
-            split_exp_factor = 2 if causal and use_tmem_red else 1
-            maxnreg = 128
-            num_kv_buffers = 8
-            use_exp2_turnstile = True
-            cga_layout = ()
-        elif head_dim == 128:
+    if is_rubin() and use_tmem_red:
+        if causal and head_dim == 64:
             if is_fp8:
-                group_size_n = 8 if causal else 1
-                split_exp_factor = 1
-                maxnreg = 128
-                num_kv_buffers = 5
-                use_exp2_turnstile = False
-                cga_layout = ()
-                if causal and not use_tmem_red and n_ctx >= 8192:
+                num_kv_buffers = 6
+                if n_ctx <= 2048:
+                    group_size_n = 4
                     split_exp_factor = 2
-                    num_kv_buffers = 4
-            elif dtype == torch.float16:
-                group_size_n = 8 if causal else 1
-                split_exp_factor = 1 if causal or use_tmem_red else 2
-                maxnreg = 128
+                if n_ctx <= 1024:
+                    use_exp2_turnstile = False
+                if n_ctx >= 4096:
+                    maxnreg = 128
+            elif dtype == torch.float16 and n_ctx >= 16384:
+                group_size_n = 4
+                split_exp_factor = 4
                 num_kv_buffers = 4
-                use_exp2_turnstile = False
-                cga_layout = () if n_ctx <= 1024 else ((1, 0), )
+        elif causal and head_dim == 128:
+            if is_fp8:
+                if n_ctx <= 1024:
+                    split_exp_factor = 1
+                    num_kv_buffers = 5
+                elif n_ctx <= 2048:
+                    group_size_n = 4
+                    split_exp_factor = 8
+            elif dtype == torch.float16 and n_ctx >= 4096:
+                group_size_n = 8
+                split_exp_factor = 1
+                num_kv_buffers = 4
+                cga_layout = ((1, 0), )
+        elif not causal and head_dim == 128:
+            if is_fp8:
+                split_exp_factor = 2
+            elif dtype == torch.float16:
+                num_kv_buffers = 4
 
     config = KernelConfig(
         BLOCK_M=block_m,
