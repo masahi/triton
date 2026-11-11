@@ -1,3 +1,11 @@
+"""
+Shared-memory barriers (mbarriers) for CDNA5.
+
+An mbarrier lives in shared memory allocated with :class:`MBarrierLayout` and tracks a pending arrival count and a
+phase. Set it up with :func:`init`, signal it with :func:`arrive` and block on phase completion with :func:`wait`.
+Asynchronous copies and TDM operations can also arrive on an mbarrier when they complete.
+"""
+
 import triton.experimental.gluon.language._core as ttgl
 from triton.experimental.gluon.language._layouts import SwizzledSharedLayout
 from triton.experimental.gluon.language._core import builtin, _unwrap_if_constexpr
@@ -20,8 +28,11 @@ class MBarrierLayout(SwizzledSharedLayout):
 @builtin
 def init(mbarrier, count, _semantic=None):
     """
-    Initialize an mbarrier with a specified count. An mbarrier consists of an init count, a pending count and a phase.
-    At initialization, the init count and pending count are initialized with the given 'count' and the phase is initialized to 0.
+    Initialize an mbarrier with a specified count.
+
+    An mbarrier consists of an init count, a pending count and a phase.
+    At initialization, the init count and pending count are initialized with the
+    given ``count`` and the phase is initialized to 0.
 
     Args:
         mbarrier (shared_memory_descriptor): The barrier object to initialize.
@@ -35,12 +46,13 @@ def init(mbarrier, count, _semantic=None):
 def wait(mbarrier, phase, _semantic=None):
     """
     Wait until the mbarrier's phase differs from the provided phase value.
-    This means that the given 'phase' has completed.
+
+    This means that the given ``phase`` has completed.
 
     Args:
         mbarrier (shared_memory_descriptor): The barrier object to wait on.
         phase (int): The phase value to compare against. The wait completes when
-        the barrier's phase becomes different from this value.
+            the barrier's phase becomes different from this value.
     """
     phase = _semantic.to_tensor(phase)
 
@@ -50,17 +62,21 @@ def wait(mbarrier, phase, _semantic=None):
 @builtin
 def arrive(mbarrier, *, count=1, _semantic=None):
     """
-    Arrive at an mbarrier with a specified count. The operation requires a `count` attribute
-    of at least 1, and decreases the pending arrival count of the mbarrier by the specific count.
-    If the pending count reaches zero, the phase changes (is decremented in a wraparound manner) and the
-    pending count is reloaded with the init count value. Returns the mbarrier's phase parity (0 for even, 1 for odd) prior to the "arrive" operation.
+    Arrive at an mbarrier with a specified count.
+
+    The operation requires a ``count`` attribute of at least 1, and decreases the
+    pending arrival count of the ``mbarrier`` by the specific count.
+    If the pending count reaches zero, the phase changes (is decremented in a
+    wraparound manner) and the pending count is reloaded with the init count value.
+    Returns the mbarrier's phase parity (0 for even, 1 for odd) prior to the
+    ``arrive`` operation.
 
     Args:
         mbarrier (shared_memory_descriptor): Barrier to be signalled.
         count (int): Count to arrive with. Defaults to 1.
 
     Returns:
-        prior phase (int): phase of mbarrier, prior to "arrive" operation.
+        int: Phase of the mbarrier prior to the ``arrive`` operation.
     """
     count = _unwrap_if_constexpr(count)
     handle = _semantic.builder.create_lds_barrier_arrive(mbarrier.handle, count)

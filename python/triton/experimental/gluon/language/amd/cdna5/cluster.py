@@ -1,3 +1,10 @@
+"""
+Cluster barrier for CDNA5.
+
+Synchronizes execution of the CTAs in a cluster: each CTA calls :func:`arrive` and then :func:`wait`, which blocks
+until every CTA in the cluster has arrived.
+"""
+
 from triton.experimental.gluon.language._core import builtin
 
 __all__ = ["arrive", "wait"]
@@ -15,6 +22,7 @@ def arrive(_semantic=None):
 def wait(_semantic=None):
     """
     Wait on a cluster barrier to be arrived by all CTAs within the same cluster.
+
     Arrive and wait operations must come in pairs. Waiting before arriving or arriving more than once
     without a corresponding wait will result in undefined behavior.
     """

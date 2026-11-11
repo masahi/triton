@@ -16,6 +16,7 @@ from ..blackwell.tma import (
 )
 from ..hopper.tma import (
     _emit_alignment_check,
+    _tma_cache_policy,
     tensor_descriptor_im2col,
     tensor_descriptor_im2col_type,
 )
@@ -43,7 +44,8 @@ __all__ = [
 
 
 @builtin
-def async_load(tensor_desc, coord, barrier, result, pred=True, multicast=False, report_validity="none", _semantic=None):
+def async_load(tensor_desc, coord, barrier, result, pred=True, multicast=False, report_validity="none",
+               cache_policy=None, _semantic=None):
     """
     Load data from global memory to shared memory using TMA.
 
@@ -54,6 +56,7 @@ def async_load(tensor_desc, coord, barrier, result, pred=True, multicast=False, 
         result: Destination memory descriptor.
         pred: Predicate for conditional execution.
         multicast: Enable multicast.
+        cache_policy: Optional compile-time L2 eviction policy.
         report_validity: Optional payload validity mode carried on the TMA
             completion barrier. Validity reporting does not support two-CTA
             TMA mode. Supported values are:
@@ -86,6 +89,7 @@ def async_load(tensor_desc, coord, barrier, result, pred=True, multicast=False, 
     pred = _semantic.to_tensor(pred)
     multicast = _unwrap_if_constexpr(multicast)
     report_validity = _semantic._str_to_report_validity(report_validity)
+    cache_policy = _tma_cache_policy(cache_policy, _semantic.builder)
 
     _semantic.builder.create_async_tma_copy_global_to_local(
         tensor_desc.handle,
@@ -95,5 +99,6 @@ def async_load(tensor_desc, coord, barrier, result, pred=True, multicast=False, 
         pred.handle,
         multicast,
         None,
+        cache_policy,
         report_validity,
     )

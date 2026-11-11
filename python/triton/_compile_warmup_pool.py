@@ -117,14 +117,25 @@ def _restore_dynamic_source(python_function, src):
             )
 
 
-def _make_dynamic_jit_callable(callable_type, args, src, starting_line_number):
+@dataclass(frozen=True)
+class _SourceLocation:
+    file_name: str
+    starting_line_number: int
+    def_file_line_number: int
+    def_file_col_number: int
+
+
+def _make_dynamic_jit_callable(callable_type, args, src, source_location: _SourceLocation):
     python_function = args[0]
     if isinstance(python_function, _CodeGenFunction):
         python_function = python_function.jit_function.fn
     _restore_dynamic_source(python_function, src)
     function = callable_type(*args)
     function._unsafe_update_src(src)
-    function.starting_line_number = starting_line_number
+    function.file_name = source_location.file_name
+    function.starting_line_number = source_location.starting_line_number
+    function.def_file_line_number = source_location.def_file_line_number
+    function.def_file_col_number = source_location.def_file_col_number
     return function
 
 
@@ -178,7 +189,9 @@ class _JITFunctionPickler(CloudPickler):
             obj._repr,
             obj.launch_metadata,
         )
-        return _make_dynamic_jit_callable, (type(obj), args, obj.src, obj.starting_line_number)
+        source_location = _SourceLocation(obj.file_name, obj.starting_line_number, obj.def_file_line_number,
+                                          obj.def_file_col_number)
+        return _make_dynamic_jit_callable, (type(obj), args, obj.src, source_location)
 
 
 def _jit_dumps(obj):
@@ -200,25 +213,19 @@ def _jit_dumps(obj):
 
 def _preload_with_compile_context(function, name, key, serialized_target, serialized_options, signature, constants,
                                   attrs):
-    from triton.runtime.driver import driver
+    from triton.backends.compiler import GPUTarget
+    from triton.compiler import ASTSource, compile
 
     if name != function._fn_name:
         raise RuntimeError(f"Specialization data is for {name} but trying to preload for {function._fn_name}")
-    active_driver = driver.active
-    device = active_driver.get_current_device()
-    _, _, target, backend, _ = function.device_caches[device]
-    if target.__dict__ != serialized_target:
-        raise RuntimeError(f"Specialization data is for {serialized_target} but trying to preload for {target}")
-    options = backend.parse_options(serialized_options)
-    return function._do_compile(
-        key,
-        signature,
-        device,
-        constants,
-        options,
-        attrs,
-        warmup=True,
-    )
+    target = GPUTarget(**serialized_target)
+    if function.is_gluon():
+        from triton.experimental.gluon._runtime import GluonASTSource
+
+        source = GluonASTSource(function, signature, constants, attrs)
+    else:
+        source = ASTSource(function, signature, constants, attrs)
+    return compile(source, target=target, options=serialized_options)
 
 
 def _warmup_kernel(kernel, args, grid, kwargs):
@@ -258,6 +265,10 @@ def _silence_worker_shutdown_diagnostics():
     # otherwise emits the same known leak report from every ephemeral worker.
     atexit.register(_silence_worker_shutdown_stderr)
     _SHUTDOWN_STDERR_SILENCED = True
+
+
+def _initialize_preload_worker(triton_key):
+    triton.runtime.cache.triton_key = lambda: triton_key
 
 
 def _preload_worker(module_name, qualified_name, fn_bytes, compile_context_bytes, kernel_repr, instrumentation_mode,
@@ -340,7 +351,9 @@ class ProcessPoolWarmupDispatcher:
         self._executor = None
         if self._connection is None:
             context = mp.get_context("spawn")
-            self._executor = ProcessPoolExecutor(max_workers=max_workers, mp_context=context)
+            self._executor = ProcessPoolExecutor(max_workers=max_workers, mp_context=context,
+                                                 initializer=_initialize_preload_worker,
+                                                 initargs=(triton.runtime.cache.triton_key(), ))
         self._max_workers = max_workers
         self._cache_dir = triton.knobs.cache.dir
         self._trace_directory = trace_directory
@@ -352,6 +365,7 @@ class ProcessPoolWarmupDispatcher:
         self._attempted_tests = set()
         self._serialized_keys = set()
         self._serialized_functions = {}
+        self._serialized_function_payloads = {}
         self._submitted_keys = set()
 
     def record_test(self, test, phase=None):
@@ -487,7 +501,11 @@ class ProcessPoolWarmupDispatcher:
                 module_name = None
                 qualified_name = None
                 try:
-                    fn_bytes = _jit_dumps(function)
+                    function_key = (type(function), function._fn_name, function.cache_key)
+                    fn_bytes = self._serialized_function_payloads.get(function_key)
+                    if fn_bytes is None:
+                        fn_bytes = _jit_dumps(function)
+                        self._serialized_function_payloads[function_key] = fn_bytes
                 except Exception as error:
                     self._serialized_keys.remove(serialized_key)
                     raise _UnsupportedPreloadError(
@@ -550,6 +568,7 @@ class ProcessPoolWarmupDispatcher:
             self._attempted_tests.clear()
             self._serialized_keys.clear()
             self._serialized_functions.clear()
+            self._serialized_function_payloads.clear()
             self._submitted_keys.clear()
 
 
