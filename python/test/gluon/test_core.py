@@ -8584,10 +8584,12 @@ def test_tma_validcheck(report_validity):
 
 
 @pytest.mark.skipif(not is_rubin(), reason="Requires Rubin")
-def test_tma_validcheck_multi_stage():
-    # Pipelining loads with TMA retries requires the TMA warp to track the
-    # primary phase and progress independently for each stage. This test
-    # demonstrates a simple per-stage state-management scheme.
+@pytest.mark.parametrize("num_stages", [2, 4])
+@pytest.mark.parametrize("num_blocks", [3, 8, 13])
+def test_tma_validcheck_multi_stage(num_stages, num_blocks):
+    # Like CuTeDSL's PipelineTmaUmmaRetry, give the initial producer and retry
+    # controller separate warps. Both the consumer and retry warp release each
+    # stage, so the producer cannot reuse it before its validity was observed.
 
     @gluon.jit
     def tuple_replace(values, index: ttgl.constexpr, value, size: ttgl.constexpr):
@@ -8601,7 +8603,35 @@ def test_tma_validcheck_multi_stage():
 
     @gluon.jit
     def tma_warp(
-        input_ptr,
+        input_desc,
+        num_elems: ttgl.constexpr,
+        block_size: ttgl.constexpr,
+        num_stages: ttgl.constexpr,
+        smem,
+        bar_full,
+        bar_empty,
+        REPORT_VALIDITY: ttgl.constexpr,
+    ):
+        num_blocks: ttgl.constexpr = num_elems // block_size
+        phase = 1
+        for batch in range(ttgl.cdiv(num_blocks, num_stages)):
+            for stage in ttgl.static_range(num_stages):
+                block = batch * num_stages + stage
+                if block < num_blocks:
+                    rubin.mbarrier.wait(bar_empty.index(stage), phase)
+                    rubin.mbarrier.expect(bar_full.index(stage), input_desc.block_type.nbytes)
+                    rubin.tma.async_load(
+                        input_desc,
+                        [0, block * block_size],
+                        bar_full.index(stage),
+                        smem.slice(stage, 1, dim=0),
+                        report_validity=REPORT_VALIDITY,
+                    )
+            phase ^= 1
+
+    @gluon.jit
+    def retry_warp(
+        input_desc,
         need_update_ptr,
         num_elems: ttgl.constexpr,
         block_size: ttgl.constexpr,
@@ -8611,45 +8641,19 @@ def test_tma_validcheck_multi_stage():
         bar_empty,
         REPORT_VALIDITY: ttgl.constexpr,
     ):
-        input_desc = rubin.tma.make_tensor_descriptor(
-            input_ptr,
-            shape=[1, num_elems],
-            strides=[num_elems, 1],
-            block_shape=[1, block_size],
-            layout=smem_layout,
-        )
-
+        num_blocks: ttgl.constexpr = num_elems // block_size
         primary_phases = (0, ) * num_stages
         blocks_copied_by_stage = (0, ) * num_stages
-        stages_full = (0, ) * num_stages
-
-        num_blocks: ttgl.constexpr = num_elems // block_size
-        ttgl.static_assert(num_blocks % num_stages == 0, "num_blocks must be divisible by num_stages")
-        blocks_per_stage: ttgl.constexpr = num_blocks // num_stages
-
-        # Prime the pipeline.
-        for stage in ttgl.static_range(num_stages):
-            cur_full_bar = bar_full.index(stage)
-            rubin.mbarrier.wait(bar_empty.index(stage), 1)
-            rubin.mbarrier.expect(cur_full_bar, input_desc.block_type.nbytes)
-            rubin.tma.async_load(
-                input_desc,
-                [0, block_size * stage],
-                cur_full_bar,
-                smem.slice(stage, 1, dim=0),
-                report_validity=REPORT_VALIDITY,
-            )
 
         num_copied = 0
         while num_copied != num_blocks:
-            # Advance every stage once, so a slow stage does not prevent later
-            # stages from completing, retrying, or refilling.
+            # Poll every stage without blocking: an invalid early stage must
+            # not prevent later stages from completing or being retried.
             for stage in ttgl.static_range(num_stages):
                 blocks_copied = blocks_copied_by_stage[stage]
-                stage_full = stages_full[stage]
+                block = blocks_copied * num_stages + stage
 
-                if stage_full == 0:
-                    # The previous TMA this stage issued hasn't completed or turned out to be invalid
+                if block < num_blocks:
                     primary_phase = primary_phases[stage]
                     attempt_done, data_valid = rubin.mbarrier.test_wait_validity(
                         bar_full.index(stage),
@@ -8665,37 +8669,19 @@ def test_tma_validcheck_multi_stage():
                             num_copied += 1
                             blocks_copied_by_stage = tuple_replace(blocks_copied_by_stage, stage, blocks_copied,
                                                                    num_stages)
-                            stages_full = tuple_replace(stages_full, stage, 1, num_stages)
-                            stage_full = 1
+                            # This arrival and the consumer's arrival are both
+                            # required before the producer can reuse the stage.
+                            rubin.mbarrier.arrive(bar_empty.index(stage), count=1)
                         else:
                             request_tma_validcheck_data_update(need_update_ptr)
                             rubin.mbarrier.expect(bar_full.index(stage), input_desc.block_type.nbytes)
                             rubin.tma.async_load(
                                 input_desc,
-                                [0, block_size * (blocks_copied * num_stages + stage)],
+                                [0, block_size * block],
                                 bar_full.index(stage),
                                 smem.slice(stage, 1, dim=0),
                                 report_validity=REPORT_VALIDITY,
                             )
-
-                if stage_full == 1 and blocks_copied != blocks_per_stage:
-                    # Attempt issuing TMA for the next block for this stage. Check the empty barrier without blocking
-                    # The non-blocking wait allows each producer stage to advance independently. Since the consumer
-                    # process stages in a fixed order, a blocking wait in the producer can easily create a deadlock
-                    # between the producer and the consumer.
-                    acquire_phase = (blocks_copied + 1) & 1
-                    empty_ready = rubin.mbarrier.test_wait(bar_empty.index(stage), acquire_phase)
-
-                    if empty_ready == 1:
-                        rubin.mbarrier.expect(bar_full.index(stage), input_desc.block_type.nbytes)
-                        rubin.tma.async_load(
-                            input_desc,
-                            [0, block_size * (blocks_copied * num_stages + stage)],
-                            bar_full.index(stage),
-                            smem.slice(stage, 1, dim=0),
-                            report_validity=REPORT_VALIDITY,
-                        )
-                        stages_full = tuple_replace(stages_full, stage, 0, num_stages)
 
     @gluon.jit
     def data_init_warp(
@@ -8706,8 +8692,10 @@ def test_tma_validcheck_multi_stage():
         num_elems: ttgl.constexpr,
         block_size: ttgl.constexpr,
     ):
-        copy_layout: ttgl.constexpr = ttgl.BlockedLayout([1], [32], [1], [0])
-        copy_width: ttgl.constexpr = 32
+        # Publish aligned 16-byte chunks with one vector store per chunk, as
+        # required by per-16B validity checking. Narrow stores could expose a
+        # valid sampled element before the rest of its chunk is written.
+        copy_layout: ttgl.constexpr = ttgl.BlockedLayout([8], [32], [1], [0])
         num_blocks: ttgl.constexpr = num_elems // block_size
 
         wait_for_tma_validcheck_data_update_request(need_update_ptr)
@@ -8715,10 +8703,9 @@ def test_tma_validcheck_multi_stage():
         for i in ttgl.static_range(num_blocks):
             block_idx = ttgl.load(order_ptr + i).item()
             block_offset = block_idx * block_size
-            for j in ttgl.static_range(block_size // copy_width):
-                offsets = block_offset + j * copy_width + ttgl.arange(0, copy_width, copy_layout)
-                vals = ttgl.load(valid_input_ptr + offsets)
-                ttgl.store(input_ptr + offsets, vals)
+            offsets = block_offset + ttgl.arange(0, block_size, copy_layout)
+            vals = ttgl.load(valid_input_ptr + offsets)
+            ttgl.store(input_ptr + offsets, vals)
 
     @gluon.jit
     def consumer(
@@ -8736,17 +8723,18 @@ def test_tma_validcheck_multi_stage():
         num_iter = num_elems // block_size
         phase = 0
 
-        for _ in range(num_iter // num_stages):
+        for batch in range(ttgl.cdiv(num_iter, num_stages)):
             for stage in ttgl.static_range(num_stages):
-                rubin.mbarrier.wait(bar_full.index(stage), phase, phase_type="conditional")
+                if batch * num_stages + stage < num_iter:
+                    rubin.mbarrier.wait(bar_full.index(stage), phase, phase_type="conditional")
 
-                value = smem.slice(stage, 1, dim=0).load(block_layout)
-                value = ttgl.reshape(value, [block_size])
+                    value = smem.slice(stage, 1, dim=0).load(block_layout)
+                    value = ttgl.reshape(value, [block_size])
 
-                rubin.fence_async_shared()
-                rubin.mbarrier.arrive(bar_empty.index(stage), count=1)
-                ttgl.store(output_ptr + offset, value)
-                offset += block_size
+                    rubin.fence_async_shared()
+                    rubin.mbarrier.arrive(bar_empty.index(stage), count=1)
+                    ttgl.store(output_ptr + offset, value)
+                    offset += block_size
 
             phase ^= 1
 
@@ -8764,34 +8752,44 @@ def test_tma_validcheck_multi_stage():
         dtype: ttgl.constexpr,
         REPORT_VALIDITY: ttgl.constexpr,
     ):
+        input_desc = rubin.tma.make_tensor_descriptor(
+            input_ptr,
+            shape=[1, num_elems],
+            strides=[num_elems, 1],
+            block_shape=[1, block_size],
+            layout=smem_layout,
+        )
         smem = ttgl.allocate_shared_memory(dtype, [num_stages, block_size], smem_layout)
         bar_full = ttgl.allocate_shared_memory(ttgl.int64, [num_stages, 1], rubin.mbarrier.MBarrierLayout())
         bar_empty = ttgl.allocate_shared_memory(ttgl.int64, [num_stages, 1], rubin.mbarrier.MBarrierLayout())
 
         for i in range(num_stages):
             rubin.mbarrier.init(bar_full.index(i), count=1)
-            rubin.mbarrier.init(bar_empty.index(i), count=1)
+            rubin.mbarrier.init(bar_empty.index(i), count=2)
 
         ttgl.warp_specialize(
             [
                 (consumer, (output_ptr, num_elems, block_size, num_stages, smem, bar_full, bar_empty)),
-                (tma_warp, (input_ptr, need_update_ptr, num_elems, block_size, num_stages, smem, bar_full, bar_empty,
-                            REPORT_VALIDITY)),
+                (tma_warp, (input_desc, num_elems, block_size, num_stages, smem, bar_full, bar_empty, REPORT_VALIDITY)),
+                (retry_warp, (input_desc, need_update_ptr, num_elems, block_size, num_stages, smem, bar_full, bar_empty,
+                              REPORT_VALIDITY)),
                 (data_init_warp, (input_ptr, valid_input_ptr, order_ptr, need_update_ptr, num_elems, block_size)),
             ],
-            (1, 1),
-            (128, 32),
+            (1, 1, 1),
+            (128, 128, 32),
         )
+
+        for i in ttgl.static_range(num_stages):
+            rubin.mbarrier.invalidate(bar_full.index(i))
+            rubin.mbarrier.invalidate(bar_empty.index(i))
 
     report_validity = "per_16B_fp16"
     element_bitwidth = 16
-    num_elems = 1024
     block_size = 128
-    num_stages = 4
+    num_elems = num_blocks * block_size
 
     input_tensor = -torch.zeros((1, num_elems), device="cuda", dtype=torch.float16)
     valid_input = torch.empty_like(input_tensor)
-    num_blocks = num_elems // block_size
     for block in range(num_blocks):
         valid_input[0, block * block_size:(block + 1) * block_size] = block
 

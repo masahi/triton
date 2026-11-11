@@ -239,11 +239,11 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
   }
 
   // RUBIN-LABEL: tma_copy_global_to_local_report_validity
-  // RUBIN: .mbarrier::complete_tx::bytes.report_valid::per_16bytes::80000000
-  // RUBIN: .mbarrier::complete_tx::bytes.report_valid::per_16bytes::8000
-  // RUBIN: .mbarrier::complete_tx::bytes.report_valid::per_16bytes::80
-  // RUBIN: .mbarrier::complete_tx::bytes.report_valid::per_16bytes::8
-  // RUBIN: .mbarrier::complete_tx::bytes.report_valid::per_element::ff
+  // RUBIN: .mbarrier::complete_tx::bytes.mbarrier::report::validity::per_16bytes::80000000
+  // RUBIN: .mbarrier::complete_tx::bytes.mbarrier::report::validity::per_16bytes::8000
+  // RUBIN: .mbarrier::complete_tx::bytes.mbarrier::report::validity::per_16bytes::80
+  // RUBIN: .mbarrier::complete_tx::bytes.mbarrier::report::validity::per_16bytes::8
+  // RUBIN: .mbarrier::complete_tx::bytes.mbarrier::report::validity::per_element::ff
   tt.func @tma_copy_global_to_local_report_validity(%tma: !tt.tensordesc<128x128xf32, #shared1>, %alloc: !ttg.memdesc<128x128xf32, #shared1, #smem, mutable>, %x: i32, %barrier: !ttg.memdesc<1xi64, #shared0, #smem>, %pred: i1) {
     ttng.async_tma_copy_global_to_local %tma[%x, %x] %alloc, %barrier, %pred reportValidity = per_16B_fp32 : !tt.tensordesc<128x128xf32, #shared1>, !ttg.memdesc<1xi64, #shared0, #smem> -> !ttg.memdesc<128x128xf32, #shared1, #smem, mutable>
     ttng.async_tma_copy_global_to_local %tma[%x, %x] %alloc, %barrier, %pred reportValidity = per_16B_fp16 : !tt.tensordesc<128x128xf32, #shared1>, !ttg.memdesc<1xi64, #shared0, #smem> -> !ttg.memdesc<128x128xf32, #shared1, #smem, mutable>
