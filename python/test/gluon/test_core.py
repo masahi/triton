@@ -4764,7 +4764,9 @@ def test_packed_exp2(dtype):
         layout: ttgl.constexpr = ttgl.BlockedLayout([2], [32], [4], [0])
         offsets = ttgl.arange(0, 256, layout=layout)
         value = ttgl.load(inp_ptr + offsets)
-        ttgl.store(out_ptr + offsets, blackwell.exp2(value))
+        result = ttgl.exp2(value)
+        ttgl.static_assert(result.dtype == value.dtype)
+        ttgl.store(out_ptr + offsets, result)
 
     inp = torch.linspace(-4.0, 4.0, 256, dtype=torch.float32, device="cuda").to(dtype)
     out = torch.empty_like(inp)

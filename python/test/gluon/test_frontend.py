@@ -1448,6 +1448,40 @@ def test_packed_arith_scalar_broadcast_frontend(typed_scalar):
     assert "ttng.packed_arith fma" in module.str_nodebug()
 
 
+@pytest.mark.parametrize("dtype, ir_dtype", [(ttgl.float16, "f16"), (ttgl.bfloat16, "bf16"), (ttgl.float32, "f32"),
+                                             (ttgl.float64, "f64")])
+@pytest.mark.parametrize("scalar", [False, True])
+def test_exp2_preserves_input_type(dtype, ir_dtype, scalar):
+
+    @gluon.jit
+    def kernel(dtype: ttgl.constexpr, scalar: ttgl.constexpr):
+        if scalar:
+            value = ttgl.full((), 1.0, dtype)
+        else:
+            layout: ttgl.constexpr = ttgl.BlockedLayout([2], [32], [4], [0])
+            value = ttgl.full([128], 1.0, dtype, layout)
+        result = ttgl.exp2(value)
+        ttgl.static_assert(result.type == value.type)
+
+    module = run_parser(kernel, args=(dtype, scalar), target=BLACKWELL_TARGET)
+    exp = [line for line in module.str_nodebug().splitlines() if "math.exp2" in line]
+    assert len(exp) == 1
+    assert f": {ir_dtype}" in exp[0] if scalar else f"tensor<128x{ir_dtype}," in exp[0]
+
+
+@pytest.mark.parametrize("dtype", [ttgl.int32, ttgl.float8e5])
+def test_exp2_rejects_unsupported_input_type(dtype):
+
+    @gluon.jit
+    def kernel(dtype: ttgl.constexpr):
+        layout: ttgl.constexpr = ttgl.BlockedLayout([2], [32], [4], [0])
+        value = ttgl.full([128], 1, dtype, layout)
+        ttgl.exp2(value)
+
+    with pytest.raises(CompilationError, match="Expected dtype"):
+        run_parser(kernel, args=(dtype, ), target=BLACKWELL_TARGET)
+
+
 @pytest.mark.parametrize("dtype, value, ir_dtype", [(ttgl.float16, 1.0, "f16"), (ttgl.bfloat16, 1.0, "bf16"),
                                                     (ttgl.float32, 2.0**-127, "f32")])
 def test_math_scalar_promotion(dtype, value, ir_dtype):

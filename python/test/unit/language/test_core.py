@@ -1134,7 +1134,7 @@ def test_neg_preserves_signed_zero(device):
                          [(dtype_x, expr, x)
                           for dtype_x in ["float32", "float64"]
                           for expr in ['exp', 'log', 'cos', 'sin', 'exp2', 'log2', 'sqrt', 'rsqrt', 'floor', 'ceil']
-                          for x in ['x', '3.0']])
+                          for x in ['x', '3.0']] + [(dtype_x, 'exp2', 'x') for dtype_x in ['float16', 'bfloat16']])
 def test_math_op(dtype_x, expr, x, device):
     np_expr = f"1.0 / np.sqrt({x})" if expr == "rsqrt" else f"np.{expr}({x})"
     _test_unary(dtype_x, f'tl.{expr}({x})', np_expr, device=device)

@@ -608,7 +608,7 @@ def _compute_and_store_exp2(config, qk, p_tmem):
     for i in gl.static_range(config.SPLIT_EXP_FACTOR):
         if config.use_fp16_exp2:
             # Evaluate exp2 in FP16 for every input type.
-            p = bw.exp2(qks[i].to(gl.float16))
+            p = gl.exp2(qks[i].to(gl.float16))
         else:
             p = gl.exp2(qks[i])
         p_tmem.slice(i * SIZE, SIZE).store(p.to(config.dtype))

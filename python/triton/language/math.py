@@ -124,7 +124,7 @@ def exp(x, _semantic=None):
 
 @core._tensor_member_fn
 @core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
+@_check_dtype(dtypes=["fp16", "bf16", "fp32", "fp64"])
 @_add_math_1arg_docstr("exponential (base 2)")
 def exp2(x, _semantic=None):
     x = _semantic.to_tensor(x)
