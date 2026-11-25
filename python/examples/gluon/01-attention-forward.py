@@ -237,11 +237,12 @@ class AttentionConfig:
     alpha_2d_layout: gl.constexpr
 
     num_kv_buffers: gl.constexpr
+    use_fp16_exp2: gl.constexpr
     use_exp2_turnstile: gl.constexpr
 
     @gluon.constexpr_function
     def __init__(self, qk_scale, Z, H, N_CTX, CGA_LAYOUT, BLOCK_M, BLOCK_N, HEAD_DIM, GROUP_SIZE_N, NUM_SMS, STAGE,
-                 SPLIT_EXP_FACTOR, dtype, num_warps, NUM_KV_BUFFERS, USE_EXP2_TURNSTILE):
+                 SPLIT_EXP_FACTOR, dtype, num_warps, NUM_KV_BUFFERS, USE_FP16_EXP2, USE_EXP2_TURNSTILE):
         self.qk_scale = qk_scale
         self.Z = Z
         self.H = H
@@ -303,6 +304,7 @@ class AttentionConfig:
             gl.BlockedLayout([1, 1], [32, 1], [self.num_warps, 1], [0, 1], cga_layout=self.CGA_LAYOUT))
 
         self.num_kv_buffers = gl.constexpr(NUM_KV_BUFFERS)
+        self.use_fp16_exp2 = gl.constexpr(USE_FP16_EXP2)
         self.use_exp2_turnstile = gl.constexpr(USE_EXP2_TURNSTILE)
 
     @gluon.jit
@@ -604,7 +606,11 @@ def _compute_and_store_exp2(config, qk, p_tmem):
     qks = _split_n(qk, config.SPLIT_EXP_FACTOR)
     ps = ()
     for i in gl.static_range(config.SPLIT_EXP_FACTOR):
-        p = gl.exp2(qks[i])
+        if config.use_fp16_exp2:
+            # Evaluate exp2 in FP16 for every input type.
+            p = bw.exp2(qks[i].to(gl.float16))
+        else:
+            p = gl.exp2(qks[i])
         p_tmem.slice(i * SIZE, SIZE).store(p.to(config.dtype))
         ps = ps + (p, )
     return _join_n(ps)
@@ -658,9 +664,9 @@ def _softmax_inner_loop(tile_id: gl.constexpr, config, prog,  #
 
         if use_tmem_red_for_tile:
             qk_max = gl.convert_layout(qk_max, m_i.type.layout)
-            m_ij = gl.maximum(m_i, qk_max * config.qk_scale)
         else:
-            m_ij = gl.maximum(m_i, gl.max(qk, 1) * config.qk_scale)
+            qk_max = gl.max(qk, 1)
+        m_ij = gl.maximum(m_i, qk_max * config.qk_scale)
         alpha = gl.exp2(m_i - m_ij)
 
         alpha_tmem = _borrow_s_as_alpha(config, s_tmem)
@@ -686,7 +692,13 @@ def _softmax_inner_loop(tile_id: gl.constexpr, config, prog,  #
         if config.use_exp2_turnstile:
             mbarrier.arrive(exp_bar, count=1)
 
-        p0, p1 = gl.reduce(_split_n(p), axis=1, combine_fn=_combine_add2)
+        p0, p1 = _split_n(p)
+        if config.use_fp16_exp2:
+            # Keep p in FP16 through exp2, then accumulate each denominator half in FP32.
+            p0 = gl.sum(p0.to(gl.float32), axis=1, in_thread_reduction="sequential")
+            p1 = gl.sum(p1.to(gl.float32), axis=1, in_thread_reduction="sequential")
+        else:
+            p0, p1 = gl.reduce((p0, p1), axis=1, combine_fn=_combine_add2)
         l_ij = gl.join(p0, p1)
         l_ij = gl.convert_layout(l_ij, l_i.type.layout, assert_trivial=True)
         alpha = gl.convert_layout(alpha, gl.SliceLayout(1, l_i.type.layout), assert_trivial=True)
@@ -893,11 +905,12 @@ def attention_kernel(  #
         BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr, HEAD_DIM: gl.constexpr,  #
         GROUP_SIZE_N: gl.constexpr, NUM_SMS: gl.constexpr, STAGE: gl.constexpr, SPLIT_EXP_FACTOR: gl.constexpr,  #
         dtype: gl.constexpr, num_warps: gl.constexpr, use_tmem_red: gl.constexpr, NUM_KV_BUFFERS: gl.constexpr,
-        USE_EXP2_TURNSTILE: gl.constexpr, CGA_LAYOUT: gl.constexpr):
+        USE_FP16_EXP2: gl.constexpr, USE_EXP2_TURNSTILE: gl.constexpr, SOFTMAX_NUM_REGS: gl.constexpr,
+        CGA_LAYOUT: gl.constexpr):
     qk_scale = sm_scale * 1.44269504
     config = AttentionConfig(qk_scale, Z, H, N_CTX, CGA_LAYOUT, BLOCK_M, BLOCK_N, HEAD_DIM, GROUP_SIZE_N, NUM_SMS,
                              STAGE, SPLIT_EXP_FACTOR,  #
-                             dtype, num_warps, NUM_KV_BUFFERS, USE_EXP2_TURNSTILE)
+                             dtype, num_warps, NUM_KV_BUFFERS, USE_FP16_EXP2, USE_EXP2_TURNSTILE)
 
     q_chnl = get_desc_channel(config, desc_q, num_buffers=2)
     kv_chnl = get_desc_channel(config, desc_k, num_buffers=config.num_kv_buffers)
@@ -955,7 +968,7 @@ def attention_kernel(  #
         (_attn_fwd_mma, (config, chnls, descs, M, STAGE)),
         (_attn_fwd_load, (config, chnls, descs, M, STAGE)),
         (_attn_fwd_epilogue, (config, chnls, descs, M, STAGE)),
-    ], [4, 4, 1, 1, 1], [192, 192, 24, 24, 24])
+    ], [4, 4, 1, 1, 1], [SOFTMAX_NUM_REGS, SOFTMAX_NUM_REGS, 24, 24, 24])
 
     q_chnl.release()
     kv_chnl.release()
@@ -1000,7 +1013,9 @@ class KernelConfig:
     OCCUPANCY: int = 1
     USE_TMEM_RED: bool = False
     NUM_KV_BUFFERS: int | None = None
+    USE_FP16_EXP2: bool | None = None
     USE_EXP2_TURNSTILE: bool | None = None
+    SOFTMAX_NUM_REGS: int | None = None
     CGA_LAYOUT: tuple[tuple[int, int], ...] | None = None
 
 
@@ -1022,6 +1037,7 @@ def select_kernel_config(
     causal: bool,
     use_tmem_red: bool,
     override: KernelConfig | None = None,
+    use_fp16_exp2: bool = False,
 ) -> KernelConfig:
     is_fp8 = dtype == torch.float8_e5m2
     is_bf16 = dtype == torch.bfloat16
@@ -1037,6 +1053,7 @@ def select_kernel_config(
     use_selected_tmem_red = (use_tmem_red or (is_bwu and not causal)) and not causal
     num_kv_buffers = _default_num_kv_buffers(head_dim, dtype)
     use_exp2_turnstile = head_dim == 64
+    softmax_num_regs = 192
     cga_layout = ()
     if not causal and head_dim == 128 and dtype.itemsize == 2:
         cga_layout = ((1, 0), )
@@ -1096,31 +1113,21 @@ def select_kernel_config(
             use_selected_tmem_red = use_tmem_red and not causal
 
     if is_rubin():
-        if head_dim == 64 and is_fp8 and (causal or not use_tmem_red):
-            group_size_n = 8 if causal else 1
-            split_exp_factor = 2 if causal and use_tmem_red else 1
+        softmax_num_regs = 164 if use_fp16_exp2 else 192
+
+        # Enable a minimal set of Rubin-specific configs for workloads that
+        # experimentally found to benefit
+        if causal or (use_fp16_exp2 and n_ctx > 16384):
+            group_size_n = 4
+            split_exp_factor = (4 if head_dim == 64 else 2) if is_fp8 else 8
             maxnreg = 128
-            num_kv_buffers = 8
-            use_exp2_turnstile = True
+            num_kv_buffers = (2 if head_dim == 64 else 4) if is_fp8 else 3
+            use_exp2_turnstile = is_fp8
             cga_layout = ()
-        elif head_dim == 128:
-            if is_fp8:
-                group_size_n = 8 if causal else 1
-                split_exp_factor = 1
-                maxnreg = 128
-                num_kv_buffers = 5
-                use_exp2_turnstile = False
-                cga_layout = ()
-                if causal and not use_tmem_red and n_ctx >= 8192:
-                    split_exp_factor = 2
-                    num_kv_buffers = 4
-            elif dtype == torch.float16:
-                group_size_n = 8 if causal else 1
-                split_exp_factor = 1 if causal or use_tmem_red else 2
-                maxnreg = 128
-                num_kv_buffers = 4
-                use_exp2_turnstile = False
-                cga_layout = () if n_ctx <= 1024 else ((1, 0), )
+            if n_ctx > 16384:
+                num_kv_buffers = 5 if is_fp8 and head_dim == 128 else 4
+                if not (is_fp8 and head_dim == 64):
+                    cga_layout = ((1, 0), )
 
     config = KernelConfig(
         BLOCK_M=block_m,
@@ -1132,7 +1139,9 @@ def select_kernel_config(
         OCCUPANCY=occupancy,
         USE_TMEM_RED=use_selected_tmem_red,
         NUM_KV_BUFFERS=num_kv_buffers,
+        USE_FP16_EXP2=use_fp16_exp2,
         USE_EXP2_TURNSTILE=use_exp2_turnstile,
+        SOFTMAX_NUM_REGS=softmax_num_regs,
         CGA_LAYOUT=cga_layout,
     )
     if override is None:
@@ -1150,8 +1159,17 @@ def select_benchmark_kernel_config(
     causal: bool,
     use_tmem_red: bool,
     override: KernelConfig | None = None,
+    use_fp16_exp2: bool = False,
 ) -> KernelConfig:
-    config = select_kernel_config(head_dim, n_ctx, dtype, causal, use_tmem_red, override)
+    config = select_kernel_config(
+        head_dim,
+        n_ctx,
+        dtype,
+        causal,
+        use_tmem_red,
+        override,
+        use_fp16_exp2=use_fp16_exp2,
+    )
     return replace(config, USE_TMEM_RED=use_tmem_red)
 
 
@@ -1166,8 +1184,8 @@ def make_tensor_desc(x, shape, strides, block_shape, cga_layout=()):
     return TensorDescriptor(x, shape=shape, strides=strides, block_shape=block_shape, layout=layout)
 
 
-def attention_forward(q, k, v, causal, sm_scale, o=None, M=None, *, use_tmem_red=False, p: KernelConfig | None = None,
-                      cga_layout=None, config_selector=select_kernel_config):
+def attention_forward(q, k, v, causal, sm_scale, o=None, M=None, *, use_tmem_red=False, use_fp16_exp2=False,
+                      p: KernelConfig | None = None, cga_layout=None, config_selector=select_kernel_config):
     if isinstance(o, bool) and M is None and use_tmem_red is False:
         use_tmem_red = o
         o = None
@@ -1178,7 +1196,7 @@ def attention_forward(q, k, v, causal, sm_scale, o=None, M=None, *, use_tmem_red
     assert HEAD_DIM_K in {16, 32, 64, 128, 256}
 
     stage = 3 if causal else 1
-    p = config_selector(HEAD_DIM_K, q.shape[2], q.dtype, causal, use_tmem_red, override=p)
+    p = config_selector(HEAD_DIM_K, q.shape[2], q.dtype, causal, use_tmem_red, override=p, use_fp16_exp2=use_fp16_exp2)
     if cga_layout is None:
         cga_layout = p.CGA_LAYOUT
 
@@ -1216,14 +1234,14 @@ def attention_forward(q, k, v, causal, sm_scale, o=None, M=None, *, use_tmem_red
     num_pid_m = triton.cdiv(q.shape[2], BLOCK_M)
     num_pid_n = q.shape[0] * q.shape[1]
     grid = min(NUM_SMS, num_pid_m * num_pid_n)
-
     attention_kernel[(grid, )](
         sm_scale, M, q.shape[0], q.shape[1], q.shape[2],  #
         desc_q, desc_k, desc_v, desc_o,  #
         BLOCK_M, BLOCK_N, HEAD_DIM_K, GROUP_SIZE_N, NUM_SMS,  #
         SPLIT_EXP_FACTOR=p.SPLIT_EXP_FACTOR, STAGE=stage, dtype=torch_dtype_to_triton(q.dtype),  #
         num_warps=p.NUM_WARPS, maxnreg=p.MAXNREG, use_tmem_red=p.USE_TMEM_RED, NUM_KV_BUFFERS=p.NUM_KV_BUFFERS,
-        USE_EXP2_TURNSTILE=p.USE_EXP2_TURNSTILE, CGA_LAYOUT=cga_layout, num_ctas=num_ctas)
+        USE_FP16_EXP2=p.USE_FP16_EXP2, USE_EXP2_TURNSTILE=p.USE_EXP2_TURNSTILE, SOFTMAX_NUM_REGS=p.SOFTMAX_NUM_REGS,
+        CGA_LAYOUT=cga_layout, num_ctas=num_ctas)
 
     return o, M
 
@@ -1240,10 +1258,11 @@ def attention_forward(q, k, v, causal, sm_scale, o=None, M=None, *, use_tmem_red
 @pytest.mark.parametrize("HEAD_DIM", [64, 128])
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float8_e5m2])
-@pytest.mark.parametrize("use_tmem_red", [False, True] if is_blackwell_ultra() else [False])
+@pytest.mark.parametrize("use_tmem_red", [False, True] if is_blackwell_ultra() or is_rubin() else [False])
+@pytest.mark.parametrize("use_fp16_exp2", [False, True], ids=["exp2", "packed-exp2"])
 @pytest.mark.parametrize("cga_layout", [(), ((1, 0), ), ((1, 0), (2, 0))], ids=["1cta", "2ctas", "4ctas"])
 @pytest.mark.skipif(not is_blackwell(), reason="Gluon attention is only supported on Blackwell GPUs")
-def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype, use_tmem_red, cga_layout, profile=False,
+def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype, use_tmem_red, cga_layout, use_fp16_exp2, profile=False,
             p: KernelConfig | None = None, config_selector=select_kernel_config):
     device = "cuda"
 
@@ -1263,11 +1282,19 @@ def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype, use_tmem_red, cga_layout, prof
 
     tri_m = torch.full(q.shape[:-1], float("nan"), device=device, dtype=torch.float32)
     tri_out, tri_m = attention_forward(q, k, v, causal, sm_scale, M=tri_m, use_tmem_red=use_tmem_red, p=p,
-                                       cga_layout=cga_layout, config_selector=config_selector)
+                                       use_fp16_exp2=use_fp16_exp2, cga_layout=cga_layout,
+                                       config_selector=config_selector)
     if dtype == torch.float8_e5m2:
         ref_out = torch.nn.functional.scaled_dot_product_attention(q.float(), k.float(), v.float(), scale=sm_scale,
                                                                    is_causal=causal)
         torch.testing.assert_close(ref_out.to(dtype).float(), tri_out.float(), atol=0.25, rtol=0.25)
+    elif use_fp16_exp2:
+        ref_out = torch.nn.functional.scaled_dot_product_attention(q.float(), k.float(), v.float(), scale=sm_scale,
+                                                                   is_causal=causal)
+        assert not torch.isnan(tri_out.float()).any()
+        # BF16 output rounding can exceed the FP16 path's absolute tolerance.
+        rtol = torch.finfo(dtype).eps if dtype == torch.bfloat16 else 0
+        torch.testing.assert_close(ref_out.to(dtype).float(), tri_out.float(), atol=2e-3, rtol=rtol)
     else:
         ref_out = torch.nn.functional.scaled_dot_product_attention(q, k, v, scale=sm_scale, is_causal=causal)
         torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=0)
@@ -1291,14 +1318,14 @@ def test_op_consan(dtype, cga_layout):
     with triton.knobs.compilation.scope():
         triton.knobs.compilation.instrumentation_mode = "consan"
         test_op(Z=1, H=1, N_CTX=1024, HEAD_DIM=64, causal=False, dtype=dtype, use_tmem_red=False, cga_layout=cga_layout,
-                p=p)
+                use_fp16_exp2=False, p=p)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float8_e5m2])
 @pytest.mark.skipif(not (is_blackwell_ultra() or is_rubin()), reason="Requires TMEM reduction support")
 def test_causal_tmem_red(dtype):
     test_op(Z=1, H=2, N_CTX=1024, HEAD_DIM=128, causal=True, dtype=dtype, use_tmem_red=True, cga_layout=(),
-            config_selector=select_benchmark_kernel_config)
+            use_fp16_exp2=False, config_selector=select_benchmark_kernel_config)
 
 
 # ===-----------------------------------------------------------------------===#
@@ -1309,7 +1336,12 @@ BATCH = [4]
 N_HEADS = [32]
 HEAD_DIM = [64, 128]
 causal = [False, True]
-providers = ["triton-fp16", "triton-fp8"]
+
+if is_rubin():
+    providers = ["triton-fp16", "triton-packed-exp2-fp16", "triton-fp8", "triton-packed-exp2-fp8"]
+else:
+    providers = ["triton-fp16", "triton-fp8"]
+
 N_CTX = [2**i for i in range(10, 17)]
 use_tmem_reds = [False, True] if is_blackwell_ultra() or is_rubin() else [False]
 
@@ -1337,7 +1369,7 @@ for Z, H, D, is_causal, use_tmem_red in itertools.product(BATCH, N_HEADS, HEAD_D
 
 @triton.testing.perf_report(bench_configs)
 def bench(Z, H, N_CTX, HEAD_DIM, causal, use_tmem_red, provider):
-    provider, dtype = provider.split("-")
+    provider, dtype = provider.rsplit("-", 1)
     if dtype == "fp16":
         dtype = torch.float16
     elif dtype == "bf16":
@@ -1358,9 +1390,10 @@ def bench(Z, H, N_CTX, HEAD_DIM, causal, use_tmem_red, provider):
     M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
 
     with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.CUDNN_ATTENTION]):
-        if provider == "triton":
-            fn = lambda: attention_forward(q, k, v, causal, sm_scale, o, M, use_tmem_red=use_tmem_red, config_selector=
-                                           select_benchmark_kernel_config)
+        if provider in ("triton", "triton-packed-exp2"):
+            use_fp16_exp2 = provider != "triton"
+            fn = lambda: attention_forward(q, k, v, causal, sm_scale, o, M, use_tmem_red=use_tmem_red, use_fp16_exp2=
+                                           use_fp16_exp2, config_selector=select_benchmark_kernel_config)
         elif provider == "cudnn":
             fn = lambda: torch.nn.functional.scaled_dot_product_attention(q, k, v, scale=sm_scale, is_causal=causal)
         else:

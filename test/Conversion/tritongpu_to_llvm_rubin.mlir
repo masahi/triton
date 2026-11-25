@@ -724,3 +724,34 @@ module attributes {"ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     tt.return
   }
 }
+
+// -----
+
+#packed_exp2 = #ttg.blocked<{sizePerThread = [2], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:107", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: @packed_exp2_f16
+  // CHECK: nvvm.ex2 {{.*}} : vector<2xf16>
+  tt.func private @packed_exp2_f16(%arg0: tensor<256xf16, #packed_exp2>) -> tensor<256xf16, #packed_exp2> {
+    %0 = math.exp2 %arg0 : tensor<256xf16, #packed_exp2>
+    tt.return %0 : tensor<256xf16, #packed_exp2>
+  }
+
+  // CHECK-LABEL: @packed_exp2_bf16
+  // CHECK: nvvm.ex2 {{.*}} ftz = true : vector<2xbf16>
+  tt.func private @packed_exp2_bf16(%arg0: tensor<256xbf16, #packed_exp2>) -> tensor<256xbf16, #packed_exp2> {
+    %0 = math.exp2 %arg0 : tensor<256xbf16, #packed_exp2>
+    tt.return %0 : tensor<256xbf16, #packed_exp2>
+  }
+}
+
+// -----
+
+#packed_exp2_tail = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:107", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: @packed_exp2_f16_tail
+  // CHECK-COUNT-1: nvvm.ex2 {{.*}} : vector<2xf16>
+  tt.func private @packed_exp2_f16_tail(%arg0: tensor<128xf16, #packed_exp2_tail>) -> tensor<128xf16, #packed_exp2_tail> {
+    %0 = math.exp2 %arg0 : tensor<128xf16, #packed_exp2_tail>
+    tt.return %0 : tensor<128xf16, #packed_exp2_tail>
+  }
+}

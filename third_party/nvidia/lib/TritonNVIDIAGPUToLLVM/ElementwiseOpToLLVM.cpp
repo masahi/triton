@@ -538,6 +538,46 @@ private:
   int computeCapability;
 };
 
+// Lower narrow exp2 in pairs so each invocation maps to one packed EX2.
+struct PackedExp2OpConversion
+    : ElementwiseOpConversionBase<math::Exp2Op, PackedExp2OpConversion> {
+  using Base =
+      ElementwiseOpConversionBase<math::Exp2Op, PackedExp2OpConversion>;
+  using Adaptor = typename Base::OpAdaptor;
+
+  explicit PackedExp2OpConversion(
+      LLVMTypeConverter &typeConverter,
+      ModuleAxisInfoAnalysis &axisAnalysisPass, int computeCapability,
+      PatternBenefit benefit = patternBenefitDefault)
+      : Base(typeConverter, axisAnalysisPass, benefit),
+        computeCapability(computeCapability) {}
+
+  SmallVector<Value> createDestOps(math::Exp2Op op, Adaptor adaptor,
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
+    bool isF16 = elemTy.isF16();
+    bool isBF16 = elemTy.isBF16();
+    if ((!isF16 || computeCapability < 75) &&
+        (!isBF16 || computeCapability < 90))
+      return {};
+
+    SmallVector<Value> values = {operands[0][0]};
+    values.push_back(operands.size() > 1 ? operands[1][0] : operands[0][0]);
+    Value packed = packLLVector(loc, values, rewriter);
+    Value result = NVVM::Ex2Op::create(rewriter, loc, packed, isBF16);
+    SmallVector<Value> results = unpackLLVector(loc, result, rewriter);
+    // The packed instruction requires two inputs; discard the duplicated output
+    // when only one input remains.
+    if (operands.size() == 1)
+      results.resize(1);
+    return results;
+  }
+
+private:
+  int computeCapability;
+};
+
 struct ExpOpConversionApprox
     : ElementwiseOpConversionBase<math::ExpOp, ExpOpConversionApprox> {
   using Base = ElementwiseOpConversionBase<math::ExpOp, ExpOpConversionApprox>;
@@ -846,6 +886,10 @@ void mlir::triton::NVIDIA::populateElementwiseOpToLLVMPatterns(
   // masks.
   patterns.add<ElementwiseOpConversion<MulhiUIOp, LLVM::UMulHOp>>(
       typeConverter, axisInfoAnalysis, benefit.getBenefit() + 1);
+
+  patterns.add<PackedExp2OpConversion>(
+      typeConverter, axisInfoAnalysis, computeCapability,
+      PatternBenefit(benefit.getBenefit() + 1));
 
 #define POPULATE_OP(SRC_OP, DST_OP, ...)                                       \
   patterns.add<                                                                \
