@@ -607,10 +607,10 @@ def _compute_and_store_exp2(config, qk, p_tmem):
     ps = ()
     for i in gl.static_range(config.SPLIT_EXP_FACTOR):
         if config.use_fp16_exp2:
-            # Evaluate exp2 in FP16 for every input type.
-            p = gl.exp2(qks[i].to(gl.float16))
+            qk = qks[i].to(gl.float16)
         else:
-            p = gl.exp2(qks[i])
+            qk = qks[i]
+        p = gl.exp2(qk)
         p_tmem.slice(i * SIZE, SIZE).store(p.to(config.dtype))
         ps = ps + (p, )
     return _join_n(ps)
@@ -1234,6 +1234,7 @@ def attention_forward(q, k, v, causal, sm_scale, o=None, M=None, *, use_tmem_red
     num_pid_m = triton.cdiv(q.shape[2], BLOCK_M)
     num_pid_n = q.shape[0] * q.shape[1]
     grid = min(NUM_SMS, num_pid_m * num_pid_n)
+
     attention_kernel[(grid, )](
         sm_scale, M, q.shape[0], q.shape[1], q.shape[2],  #
         desc_q, desc_k, desc_v, desc_o,  #
