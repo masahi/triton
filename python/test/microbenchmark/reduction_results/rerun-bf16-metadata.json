@@ -1,0 +1,24 @@
+{
+  "arguments": {
+    "suite": "full",
+    "workload": "all",
+    "output": ".triton/reduction-benchmark/recheck-bf16",
+    "repeats": 11,
+    "rep_ms": 20.0,
+    "dump_code": true,
+    "summarize": false,
+    "case_ids": "740,741,744,745"
+  },
+  "gpu": "NVIDIA Graphics Device",
+  "capability": [
+    10,
+    7
+  ],
+  "sm_count": 216,
+  "torch": "2.13.0a0+8145d630e8.nvinternal.rubin",
+  "cuda": "13.5",
+  "triton": "3.9.0",
+  "git_commit": "da2c3c079f90fad9c75a72f426f4bc860d4a6e08",
+  "benchmark_sha256": "8527233d600e042087a878347289dd72d11ebfd3e82332ca5cf41775f29c8668",
+  "timing": "Hot-input CUDA graphs, 128 launches per replay; alternating policy order"
+}
