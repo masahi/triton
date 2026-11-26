@@ -8,8 +8,16 @@ inputs and no clock locking.
 
 The paired policies use identical input/output pointers, layouts, launch
 parameters, and numerical precision. See the [benchmark methodology](../reduction.md)
-and [benchmark source](../reduction.py). Speedup is tree latency divided by
-sequential latency; values above one favor sequential.
+and [benchmark source](../reduction.py). The example table reports latency
+reduction: `100 × (tree − sequential) / tree`. Positive percentages favor
+sequential; negative percentages indicate a regression. Aggregate statistics
+and plots use the tree/sequential latency ratio (×), where values above one
+favor sequential.
+
+Sum labels specify input and accumulation precision: **FP16→FP32** and
+**BF16→FP32** are mixed-precision reductions, while **FP32→FP32** uses FP32
+throughout. Softmax dtype labels describe its input/output dtype; its
+denominator is always accumulated in FP32.
 
 Reproduce the full sweep and selected examples from the repository root:
 
@@ -19,19 +27,25 @@ python python/test/microbenchmark/reduction.py --suite full --case-ids 189,190,1
 python python/test/microbenchmark/reduction.py --suite full --case-ids 740,741,744,745 --repeats 11 --rep-ms 20 --output /tmp/reduction-bf16-rerun
 ```
 
-## Independently repeated examples
+## Selected cases rerun with longer measurements
 
-17 selected cases were repeated with 11 rounds of 20 ms per policy. The examples below use those reruns.
+After the full sweep, 17 selected cases were rerun in separate benchmark invocations
+on the same GPU, using the same implementation. These reruns used 11 measurement
+rounds of approximately 20 ms per policy, compared with 5 rounds of approximately
+10 ms in the full sweep. The table shows 7 examples from the 17 rerun
+configurations, using the longer measurements. Case IDs identify configurations
+in the full 786-case sweep and can be passed to `--case-ids`; all 17 rerun
+configurations are included in the linked rerun CSVs.
 
-| Case | Workload | Tree us | Sequential us | Speedup | Mixed adds tree/seq | Registers tree/seq |
+| Case ID | Workload | Tree (µs) | Sequential (µs) | Latency reduction (%) | Mixed adds tree/seq | Registers tree/seq |
 |---|---|---:|---:|---:|---:|---:|
-| 190 | FP16 sum, one CTA, 4×16384, output packing | 5.917 | 4.027 | 1.469 | 128/254 | 84/64 |
-| 191 | FP16 sum, 432 CTAs, 4×16384 per CTA, output packing | 7.064 | 5.159 | 1.369 | 128/254 | 84/64 |
-| 510 | FP32 sum, one CTA, 16×4096, output packing | 3.124 | 3.653 | 0.855 | 0/0 | 164/64 |
-| 542 | FP32 sum, one CTA, 4×16384, reduction packing | 4.766 | 3.389 | 1.406 | 0/0 | 64/64 |
-| 675 | FP16 softmax 4096×8192, FP32 numerator, one row per CTA | 18.358 | 16.285 | 1.127 | 8/15 | 68/62 |
-| 744 | BF16 softmax 4096×4096, rounded numerator, four rows per CTA | 10.098 | 7.919 | 1.275 | 0/0 | 195/154 |
-| 745 | BF16 softmax 4096×4096, FP32 numerator, four rows per CTA | 7.655 | 8.665 | 0.883 | 32/63 | 166/177 |
+| 190 | FP16→FP32 sum, one CTA, 4×16384, output packing | 5.917 | 4.027 | +31.9% | 128/254 | 84/64 |
+| 191 | FP16→FP32 sum, 432 CTAs, 4×16384 per CTA, output packing | 7.064 | 5.159 | +27.0% | 128/254 | 84/64 |
+| 510 | FP32→FP32 sum, one CTA, 16×4096, output packing | 3.124 | 3.653 | -16.9% | 0/0 | 164/64 |
+| 542 | FP32→FP32 sum, one CTA, 4×16384, reduction packing | 4.766 | 3.389 | +28.9% | 0/0 | 64/64 |
+| 675 | FP16 softmax 4096×8192, FP32 numerator, one row per CTA | 18.358 | 16.285 | +11.3% | 8/15 | 68/62 |
+| 744 | BF16 softmax 4096×4096, rounded numerator, four rows per CTA | 10.098 | 7.919 | +21.6% | 0/0 | 195/154 |
+| 745 | BF16 softmax 4096×4096, FP32 numerator, four rows per CTA | 7.655 | 8.665 | -13.2% | 32/63 | 166/177 |
 
 Sequential scheduling has a practical softmax benefit, but it is not universal. The FP16 FP32-numerator case emits 8 mixed adds with tree scheduling and 15 with sequential. Reusing widened rounded exponentials prevents that folding in this benchmark. The BF16 rounded-numerator win has no mixed adds at all, and its register count drops from 195 to 154; a related FP32-numerator case regresses despite emitting more mixed adds. Instruction count alone is therefore insufficient to predict performance.
 
@@ -43,28 +57,28 @@ The regressions rule out universally switching all sums to sequential. They do n
 
 786 paired cases: 606 sums and 180 softmaxes. All numerical checks passed. No register spills.
 
-Speedup is tree latency / sequential latency. Identical-PTX controls are excluded from the table below.
-The 3% threshold is descriptive, not a significance test. Timings include loads and stores.
+The aggregate table uses tree/sequential latency ratios (×). Identical-PTX controls are excluded.
+The ratio thresholds are descriptive, not significance tests. Timings include loads and stores.
 
-| Workload | Type | Cases with different PTX | Geomean | Range | >3% faster | >3% slower |
+| Workload | Sum input→accumulation / softmax dtype | Cases with different PTX | Geomean ratio (×) | Ratio range (×) | Ratio >1.03× | Ratio <1/1.03× |
 |---|---|---:|---:|---:|---:|---:|
-| sum | float16 | 158 | 1.017 | 0.943–1.473 | 21 | 3 |
-| sum | bfloat16 | 158 | 1.018 | 0.942–1.448 | 21 | 2 |
-| sum | float32 | 158 | 1.006 | 0.856–1.410 | 12 | 6 |
+| sum | FP16→FP32 | 158 | 1.017 | 0.943–1.473 | 21 | 3 |
+| sum | BF16→FP32 | 158 | 1.018 | 0.942–1.448 | 21 | 2 |
+| sum | FP32→FP32 | 158 | 1.006 | 0.856–1.410 | 12 | 6 |
 | softmax | float16 | 56 | 1.013 | 0.991–1.130 | 5 | 0 |
 | softmax | bfloat16 | 56 | 1.021 | 0.885–1.276 | 12 | 2 |
 | softmax | float32 | 28 | 1.007 | 0.981–1.020 | 0 | 0 |
 
-## Pure FP32 sums
+## FP32→FP32 sums
 
 There are 202 FP32-input / FP32-accumulation sum cases. Of the 158 with different
-PTX, 12 improve by more than 3% and 6 regress by more than 3%. The geometric-mean
-speedup across those 158 cases is 1.006×: most cases are near parity.
+PTX, 12 have a tree/sequential ratio above 1.03× and 6 below 1/1.03×. The
+geometric-mean ratio across those 158 cases is 1.006×: most cases are near parity.
 
-The independently repeated case 542 improves by 1.406× with 64 registers in
+Case 542's longer-measurement rerun improves by 1.406× with 64 registers in
 both variants, no spills, and no mixed-precision adds. In the full sweep, the
 same 4×16384 tile improves from 14.975 to 10.980 µs (1.364×) with 432 CTAs
-(case 543). That saturated-grid case was not independently repeated. The
+(case 543). That saturated-grid case was not rerun with longer measurements. The
 one-CTA case 510 instead regresses from 3.124 to 3.653 µs (0.855×).
 
 Thus pure FP32 can benefit too, but the gain is layout-dependent and cannot be

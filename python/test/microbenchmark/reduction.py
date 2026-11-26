@@ -216,15 +216,18 @@ def write_summary(records, directory):
     groups = {}
     for record in records:
         if record["workload"] == "sum":
-            group = f"sum / {record['dtype']} / {record['grid']}"
+            precision = {"float16": "FP16→FP32", "bfloat16": "BF16→FP32", "float32": "FP32→FP32"}[record["dtype"]]
+            group = f"sum / {precision} / {record['grid']}"
         else:
             group = f"softmax / {record['dtype']} / {record['numerator']} numerator / {record['rows']} rows"
         groups.setdefault(group, []).append(record)
     lines = [
-        "# Reduction scheduling results", "", "Speedup = tree latency / sequential latency; above 1 favors sequential.",
+        "# Reduction scheduling results", "",
+        "Latency reduction (%) = 100 × (tree − sequential) / tree; positive favors sequential.",
+        "Aggregate ratios are tree latency / sequential latency (×); above 1 favors sequential.",
         "Timings include memory traffic. All cases passed numerical checks against FP64 references.",
-        "Counts below use a 3% practical threshold, not a statistical significance test.", "",
-        "| Workload | Cases | Geomean speedup | Min | Max | >3% faster | >3% slower |",
+        "Ratio thresholds below are descriptive, not statistical significance tests.", "",
+        "| Workload | Cases | Geomean ratio (×) | Min ratio (×) | Max ratio (×) | Ratio >1.03× | Ratio <1/1.03× |",
         "|---|---:|---:|---:|---:|---:|---:|"
     ]
     for group, entries in sorted(groups.items()):
@@ -238,8 +241,9 @@ def write_summary(records, directory):
             continue
         lines.extend([
             "", f"## {workload}: extremes", "",
-            "Use the raw samples and independent reruns to assess stability of individual cases.", "",
-            "| Case | Tree us | Sequential us | Speedup | Mixed adds tree/seq | Registers tree/seq |",
+            "Use the raw samples and reruns in separate benchmark invocations to assess stability of individual cases.",
+            "",
+            "| Case | Tree (µs) | Sequential (µs) | Latency reduction (%) | Mixed adds tree/seq | Registers tree/seq |",
             "|---|---:|---:|---:|---:|---:|"
         ])
         for record in entries[:3] + entries[-3:]:
@@ -249,9 +253,10 @@ def write_summary(records, directory):
                 if k in ("case_id", "dtype", "rows", "cols", "block_m", "numerator", "distribution", "packing", "grid",
                          "k", "outputs", "axis", "broadcast", "warps")
             }
-            lines.append(f"| {description} | {record['tree_us']:.3f} | {record['sequential_us']:.3f} | "
-                         f"{record['speedup']:.3f} | {record['tree_mixed_adds']}/{record['sequential_mixed_adds']} | "
-                         f"{record['tree_registers']}/{record['sequential_registers']} |")
+            lines.append(
+                f"| {description} | {record['tree_us']:.3f} | {record['sequential_us']:.3f} | "
+                f"{100 * (1 - 1 / record['speedup']):+.1f}% | {record['tree_mixed_adds']}/{record['sequential_mixed_adds']} | "
+                f"{record['tree_registers']}/{record['sequential_registers']} |")
     (directory / "summary.md").write_text("\n".join(lines) + "\n")
 
 

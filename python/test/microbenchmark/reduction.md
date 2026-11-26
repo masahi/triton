@@ -19,7 +19,7 @@ The full suite contains 606 sum cases and 180 softmax cases:
 
 | Sum dimension | Coverage |
 |---|---|
-| Input / accumulation | FP16 / FP32, BF16 / FP32, FP32 / FP32 |
+| Input → accumulation | FP16→FP32, BF16→FP32, FP32→FP32 |
 | Scalar reduction inputs per thread | 1, 2, 4, 8, 16, 32, 64, 128 |
 | Independent outputs per thread | 2, 4 |
 | Reduction distribution | Registers only, within warps, across warps |
@@ -55,13 +55,15 @@ Timings replay CUDA graphs containing 128 launches, with hot inputs and five
 measurement rounds by default. Measurement order alternates between policies.
 All timings include loads and stores; these are not isolated instruction
 latencies. No autotuning or GPU clock locking is performed. Run on an idle GPU
-and repeat interesting cases independently before drawing conclusions.
+and rerun interesting cases in separate benchmark invocations before drawing conclusions.
 
-`results.csv` contains paired median latencies, min/max samples, speedups,
+`results.csv` contains paired median latencies, min/max samples, tree/sequential latency ratios (`speedup`),
 registers, spills, shared-memory usage, static PTX mixed-add counts, and errors.
 `results.jsonl` additionally preserves all timing samples and is appended after
 each completed case. `metadata.json` records arguments, hardware, software,
 the compiler commit, and the benchmark source hash. `summary.md` groups results
-and highlights extremes; its 3% thresholds are descriptive, not significance
-tests. A speedup above one favors sequential reduction. Regenerate the summary
+and highlights extremes. Example tables show latency reduction as
+`100 × (tree − sequential) / tree`; positive percentages favor sequential.
+Aggregate tables and plots use tree/sequential ratios (×), where values above
+one favor sequential. Ratio thresholds are descriptive, not significance tests. Regenerate the summary
 with `--summarize --output <existing-output-directory>`.
